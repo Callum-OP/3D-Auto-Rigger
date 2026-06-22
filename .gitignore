@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+Thumbs.db
+
+# python bytecode cache
+__pycache__/
+*.pyc
+
+# generated test/rig outputs
+assets/test/*.glb
+out_rigged.glb
+*_rigged_*.glb

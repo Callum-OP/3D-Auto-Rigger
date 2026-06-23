@@ -73,9 +73,10 @@ def _cluster_1d(xs, gap):
 # reads more naturally (and matches Clip-Studio-style figures).
 ELBOW_BIAS = 0.58
 KNEE_BIAS = 0.58
-# Spine segment heights as fractions of the trunk (hips -> chest).
-SPINE_FRAC = 0.33    # waist
-SPINE1_FRAC = 0.66   # abdomen / mid-back
+# The navel marks the hips/torso boundary: the Hips section ends here, and
+# Waist / Lower-torso / Upper-torso (Spine / Spine1 / Chest) split the
+# navel -> neck span into equal thirds above it.
+NAVEL_FRAC = 0.30    # navel height as a fraction from the crotch up to the neck
 # Ball of foot as a fraction of the foot's forward reach (rest goes to the toe).
 BALL_FRAC = 0.6
 
@@ -84,9 +85,9 @@ def proportional_landmarks(H):
     return {
         # spine chain (centered on X=0): hips -> waist -> abdomen -> chest
         "hips_z":     0.53 * H,
-        "spine_z":    0.59 * H,
-        "spine1_z":   0.66 * H,
-        "chest_z":    0.72 * H,
+        "spine_z":    0.62 * H,   # waist (navel)
+        "spine1_z":   0.69 * H,   # lower torso
+        "chest_z":    0.76 * H,   # upper torso
         "neck_z":     0.83 * H,
         "head_z":     0.88 * H,
         "head_top_z": 1.00 * H,
@@ -175,11 +176,20 @@ def detect_landmarks(points, H, n_slabs=160, log=lambda *a: None):
         leg_xs = [abs(c[2]) for r in low for c in r["clusters"]]
         leg_x = _median(leg_xs)
         if leg_x and leg_x > 1e-4:
-            lm["hips_z"] = crotch_z
+            # The crotch is only reliable when the thighs are visibly apart.
+            # When they touch (common on real characters) the legs separate
+            # only near the calves, dragging the crotch far too low — so trust
+            # the detection only inside a plausible band, else use proportion.
+            if min_z + 0.44 * span <= crotch_z <= min_z + 0.57 * span:
+                lm["hips_z"] = crotch_z
+                src = f"detected @ {crotch_z:.2f}m"
+            else:
+                lm["hips_z"] = min_z + 0.50 * span
+                src = f"fallback @ {lm['hips_z']:.2f}m (implausible crotch {crotch_z:.2f})"
             lm["hip_x"] = leg_x
             lm["knee_x"] = leg_x
             lm["ankle_x"] = leg_x
-            log("landmark", f"crotch @ {crotch_z:.2f}m, leg X +/-{leg_x:.2f}m")
+            log("landmark", f"crotch {src}, leg X +/-{leg_x:.2f}m")
 
     # --- ankle + foot: bottom slab geometry ---------------------------------- #
     bottom = [r for r in valid if r["z"] < min_z + 0.12 * span]
@@ -191,27 +201,37 @@ def detect_landmarks(points, H, n_slabs=160, log=lambda *a: None):
     # knee: biased toward the ankle/foot
     lm["knee_z"] = _lerp(lm["hips_z"], lm["ankle_z"], KNEE_BIAS)
 
-    # --- neck: narrowest central width in the upper body --------------------- #
+    # --- neck: narrowest central cross-section, searched high so it lands on --- #
+    # the actual neck and doesn't swallow the upper torso.
     upper = [r for r in valid
-             if min_z + 0.70 * span < r["z"] < min_z + 0.93 * span]
+             if min_z + 0.80 * span < r["z"] < min_z + 0.96 * span]
     if upper:
         neck = min(upper, key=_central_width)
         neck_z = neck["z"]
         lm["neck_z"] = neck_z
         lm["head_z"] = min(neck_z + 0.03 * H, max_z)
         lm["head_top_z"] = max_z
-        # shoulders sit just below the neck, at the edge of the torso
+        # Shoulders sit just below the neck, at the TORSO edge. Measure torso
+        # width from a band BELOW the arms (mid-upper torso): at shoulder height
+        # a T-pose arm merges with the torso cross-section and would otherwise
+        # blow the width up to the full armspan (placing the shoulder near the
+        # hand). The narrowest sample in the band best resists arm contamination.
         sh_z = neck_z - 0.04 * H
-        below = [r for r in valid if abs(r["z"] - sh_z) < 0.03 * H]
-        if below:
-            torso_half = max(_central_width(r) for r in below) * 0.5
-            lm["shoulder_z"] = sh_z
-            lm["shoulder_x"] = max(torso_half * 0.85, 0.04 * H)
-        # chest, then waist + abdomen interpolated up the trunk
-        lm["chest_z"] = sh_z - 0.06 * H
-        lm["spine_z"] = _lerp(lm["hips_z"], lm["chest_z"], SPINE_FRAC)
-        lm["spine1_z"] = _lerp(lm["hips_z"], lm["chest_z"], SPINE1_FRAC)
-        log("landmark", f"neck @ {neck_z:.2f}m, shoulders @ {lm['shoulder_z']:.2f}m")
+        lm["shoulder_z"] = sh_z
+        torso_band = [r for r in valid
+                      if min_z + 0.55 * span < r["z"] < min_z + 0.72 * span]
+        if torso_band:
+            torso_half = min(_central_width(r) for r in torso_band) * 0.5
+            lm["shoulder_x"] = max(torso_half * 0.95, 0.04 * H)
+        # Torso sections: Hips end at the navel; Waist / Lower-torso / Upper-torso
+        # (Spine / Spine1 / Chest) split the navel -> neck span into equal thirds.
+        navel_z = _lerp(lm["hips_z"], neck_z, NAVEL_FRAC)
+        third = (neck_z - navel_z) / 3.0
+        lm["spine_z"] = navel_z
+        lm["spine1_z"] = navel_z + third
+        lm["chest_z"] = navel_z + 2.0 * third
+        log("landmark", f"neck @ {neck_z:.2f}m, navel @ {navel_z:.2f}m, "
+                        f"shoulders @ {lm['shoulder_z']:.2f}m")
 
     # --- hands: slab reaching furthest out in X ------------------------------ #
     reach = max(valid, key=lambda r: r["xmax"])

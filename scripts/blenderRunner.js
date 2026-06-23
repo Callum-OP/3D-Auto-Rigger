@@ -53,15 +53,25 @@ function detectBlender() {
  * @returns {Promise<{output:string}>}
  */
 function runRig({ input, output, onLog }) {
+  const fields = { output };
+  if (input) fields.input = input;
+  return runJob(fields, onLog);
+}
+
+/**
+ * Run the Blender pipeline with arbitrary job fields (mode, markers, calib...).
+ * Resolves once the job's `output` file exists.
+ * @param {object}   fields   job JSON fields; must include `output`
+ * @param {function} [onLog]  called with each parsed {stage,msg} log line
+ * @returns {Promise<{output:string}>}
+ */
+function runJob(fields, onLog) {
   return new Promise((resolve, reject) => {
     const cfg = loadConfig();
     const pipeline = path.join(PROJECT_ROOT, "backend", "pipeline.py");
 
-    const job = {
-      output,
-      target_height: cfg.targetHeight,
-    };
-    if (input) job.input = input;
+    const job = { target_height: cfg.targetHeight, ...fields };
+    const output = job.output;
 
     const jobFile = path.join(os.tmpdir(), `rigjob_${process.pid}_${Date.now()}.json`);
     fs.writeFileSync(jobFile, JSON.stringify(job));
@@ -106,7 +116,7 @@ function runRig({ input, output, onLog }) {
         /* ignore */
       }
       if (failed || code !== 0 || !fs.existsSync(output)) {
-        reject(new Error(`Rigging failed (exit ${code}).\n${stderr.slice(-2000)}`));
+        reject(new Error(`Blender job failed (exit ${code}).\n${stderr.slice(-2000)}`));
       } else {
         resolve({ output });
       }
@@ -114,4 +124,4 @@ function runRig({ input, output, onLog }) {
   });
 }
 
-module.exports = { runRig, loadConfig, detectBlender };
+module.exports = { runRig, runJob, loadConfig, detectBlender };

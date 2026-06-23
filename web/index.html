@@ -2,17 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: blob:; connect-src 'self' file: blob:;"
-    />
     <title>3D Auto Rigger</title>
-    <link rel="stylesheet" href="styles.css" />
-    <script type="module" src="../node_modules/@google/model-viewer/dist/model-viewer.min.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/vendor/model-viewer.min.js"></script>
   </head>
   <body>
     <header>
-      <h1>3D Auto&nbsp;Rigger <span class="tag">v0.1 · humanoid body rig</span></h1>
+      <h1>3D Auto&nbsp;Rigger <span class="tag">humanoid body rig · runs in your browser</span></h1>
     </header>
 
     <main>
@@ -20,6 +16,7 @@
         <div class="drop-inner">
           <p class="drop-title">Drop a humanoid model here</p>
           <p class="drop-sub">.glb · .gltf · .obj · .fbx</p>
+          <input type="file" id="fileInput" accept=".glb,.gltf,.obj,.fbx" hidden />
           <button id="browseBtn" class="btn">Browse…</button>
           <p class="drop-or">or</p>
           <button id="testBtn" class="btn btn-ghost">Rig a test figure</button>
@@ -35,10 +32,23 @@
             shadow-intensity="1"
             exposure="1.0"
             environment-image="neutral"
-            ar-status="not-presenting"
           ></model-viewer>
           <div id="viewerPlaceholder" class="viewer-placeholder">
             The rigged result will appear here.
+          </div>
+
+          <div id="editor" class="editor hidden">
+            <div id="editorStage" class="editor-stage">
+              <img id="editorImg" class="editor-img" alt="front view" />
+              <div id="markerLayer" class="marker-layer"></div>
+            </div>
+            <label class="editor-mirror">
+              <input type="checkbox" id="mirrorChk" checked />
+              Mirror left/right
+            </label>
+            <p class="editor-hint">
+              Drag each dot onto the matching joint, then Build rig.
+            </p>
           </div>
         </div>
 
@@ -48,14 +58,17 @@
             <span id="inputName" class="value">— none —</span>
           </div>
           <button id="rigBtn" class="btn btn-primary" disabled>Rig model</button>
-          <button id="saveBtn" class="btn" disabled>Save rigged .glb…</button>
+          <button id="buildBtn" class="btn btn-primary hidden">Build rig from markers</button>
+          <button id="backBtn" class="btn hidden">← Back</button>
+          <button id="saveFbxBtn" class="btn btn-accent" disabled>Download .fbx</button>
+          <button id="saveBtn" class="btn" disabled>Download .glb</button>
 
-          <div class="log-header">Pipeline log</div>
+          <div class="log-header">Status</div>
           <ol id="log" class="log"></ol>
         </aside>
       </section>
     </main>
 
-    <script src="renderer.js"></script>
+    <script src="/app.js"></script>
   </body>
 </html>

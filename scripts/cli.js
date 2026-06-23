@@ -6,7 +6,7 @@
 //   npm run rig                       (rigs a generated test figure)
 
 const path = require("path");
-const { runRig } = require("../electron/blenderRunner");
+const { runRig } = require("./blenderRunner");
 
 async function main() {
   const args = process.argv.slice(2);

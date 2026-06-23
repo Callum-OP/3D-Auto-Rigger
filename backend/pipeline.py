@@ -29,6 +29,8 @@ from mathutils import Vector
 # Make sibling modules importable when run via `blender --python backend/pipeline.py`.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import landmarks
+import csp_bones
+import markers as markers_mod
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +73,19 @@ def import_model(path):
             bpy.data.objects.remove(o, do_unlink=True)
     if not meshes:
         fail("no mesh found in the imported file")
+    # Strip any prior rigging so re-rigging starts clean: an existing armature
+    # modifier + leftover vertex groups make bone-heat weighting fail outright.
+    for m in meshes:
+        for mod in list(m.modifiers):
+            if mod.type == "ARMATURE":
+                m.modifiers.remove(mod)
+        if m.parent:
+            mw = m.matrix_world.copy()
+            m.parent = None
+            m.matrix_world = mw
+        m.vertex_groups.clear()
+        if m.data.shape_keys:
+            m.shape_key_clear()
     return meshes
 
 
@@ -103,7 +118,22 @@ def make_test_human():
     parts.append(_add_box("leg_R", (-0.10, 0, 0.45), (0.13, 0.15, 0.90)))
     parts.append(_add_box("foot_L",  (0.10, -0.08, 0.03), (0.12, 0.26, 0.06)))
     parts.append(_add_box("foot_R", (-0.10, -0.08, 0.03), (0.12, 0.26, 0.06)))
-    return parts
+
+    # Voxel-remesh the overlapping boxes into ONE connected, deformable mesh.
+    # (Separate boxes can't bend at joints — they have no geometry there.)
+    bpy.ops.object.select_all(action="DESELECT")
+    for p in parts:
+        p.select_set(True)
+    bpy.context.view_layer.objects.active = parts[0]
+    bpy.ops.object.join()
+    body = bpy.context.view_layer.objects.active
+    mod = body.modifiers.new("Remesh", "REMESH")
+    mod.mode = "VOXEL"
+    mod.voxel_size = 0.04
+    bpy.ops.object.modifier_apply(modifier=mod.name)
+    bpy.ops.object.shade_smooth()
+    log("import", f"remeshed test figure -> {len(body.data.vertices)} verts")
+    return [body]
 
 
 def join_meshes(meshes):
@@ -197,6 +227,50 @@ def sample_points(obj):
     return pts
 
 
+# Finger layout: (internal name, lateral offset in spread-units, length scale).
+# Four fingers fan across the hand width; the thumb is handled separately.
+_FINGERS = [
+    ("Index",  1.5, 0.95),
+    ("Middle", 0.5, 1.00),
+    ("Ring",  -0.5, 0.92),
+    ("Pinky", -1.5, 0.78),
+]
+_SEG_FRACS = (0.45, 0.33, 0.22)   # three phalanges as fractions of finger length
+
+
+def _build_fingers(eb, side, parent, wrist, tip, knuckle):
+    """Add 5 fingers x 3 joints under the hand, matching the Mixamo hierarchy.
+
+    Placement is heuristic (hands are usually low-detail blobs in input meshes):
+    fingers fan across the hand width and point along the hand direction. The
+    goal is a correctly-named, posable finger hierarchy, not per-vertex fit.
+    """
+    hand_vec = tip - wrist
+    hand_len = hand_vec.length or 0.01
+    hdir = hand_vec.normalized()
+    spread = Vector((0, 1, 0))        # fan across front-back (Y)
+    unit = hand_len * 0.10            # spacing between fingers
+    finger_zone = hand_len * 0.4      # knuckle -> fingertip length (shorter)
+
+    for fname, yoff, lmul in _FINGERS:
+        base = knuckle + spread * (yoff * unit)
+        flen = finger_zone * lmul
+        prev, pos = parent, base
+        for i in range(3):
+            nxt = pos + hdir * (flen * _SEG_FRACS[i])
+            prev = _bone(eb, f"{fname}{i + 1}_{side}", pos, nxt, prev, i > 0)
+            pos = nxt
+
+    # Thumb: rooted nearer the wrist, offset to the front (-Y) and angled out.
+    thumb_dir = (hdir + spread * -0.7).normalized()
+    pos = wrist + hand_vec * 0.25 + spread * (-2.0 * unit)
+    prev = parent
+    for i in range(3):
+        nxt = pos + thumb_dir * (finger_zone * 0.8 * _SEG_FRACS[i])
+        prev = _bone(eb, f"Thumb{i + 1}_{side}", pos, nxt, prev, i > 0)
+        pos = nxt
+
+
 def build_skeleton(obj, lm):
     """Create a humanoid armature from a detected landmark dict `lm`."""
     log("skeleton", "assembling armature from landmarks")
@@ -227,9 +301,13 @@ def build_skeleton(obj, lm):
         la = _bone(eb, f"LowerArm_{side}",
                    (sign * lm["elbow_x"], 0, lm["elbow_z"]),
                    (sign * lm["wrist_x"], 0, lm["wrist_z"]), ua, True)
-        _bone(eb, f"Hand_{side}",
-              (sign * lm["wrist_x"], 0, lm["wrist_z"]),
-              (sign * lm["hand_x"], 0, lm["hand_z"]), la, True)
+        wrist_p = Vector((sign * lm["wrist_x"], 0, lm["wrist_z"]))
+        tip_p = Vector((sign * lm["hand_x"], 0, lm["hand_z"]))
+        # Hand bone spans wrist -> knuckles (most of the wrist->fingertip span);
+        # fingers occupy the shorter remainder.
+        knuckle = wrist_p.lerp(tip_p, 0.6)
+        hand = _bone(eb, f"Hand_{side}", wrist_p, knuckle, la, True)
+        _build_fingers(eb, side, hand, wrist_p, tip_p, knuckle)
 
         ul = _bone(eb, f"UpperLeg_{side}",
                    (sign * lm["hip_x"], 0, lm["hips_z"]),
@@ -252,17 +330,172 @@ def build_skeleton(obj, lm):
 # --------------------------------------------------------------------------- #
 # Skin: bind mesh to armature with Blender's automatic (bone-heat) weights.
 # --------------------------------------------------------------------------- #
-def skin(obj, rig):
-    log("skin", "binding mesh with automatic weights")
+def skin(obj, rig, lm, H):
+    """Robust skinning via a watertight voxel proxy.
+
+    Bone-heat auto-weighting fails outright on real character meshes
+    (intersecting/non-manifold geometry from joined sub-meshes, hair, etc.) —
+    producing zero weights. Instead we auto-weight a voxel-remeshed (watertight)
+    copy, which bone-heat handles reliably, then transfer those weights onto the
+    real mesh by nearest surface point.
+    """
+    log("skin", "building watertight weight proxy")
+    proxy = obj.copy()
+    proxy.data = obj.data.copy()
+    proxy.name = "WeightProxy"
+    bpy.context.collection.objects.link(proxy)
+    bpy.context.view_layer.objects.active = proxy
+    rm = proxy.modifiers.new("Remesh", "REMESH")
+    rm.mode = "VOXEL"
+    rm.voxel_size = 0.03
+    bpy.ops.object.modifier_apply(modifier=rm.name)
+
+    log("skin", "auto-weighting proxy")
     bpy.ops.object.select_all(action="DESELECT")
-    obj.select_set(True)
+    proxy.select_set(True)
     rig.select_set(True)
     bpy.context.view_layer.objects.active = rig
     try:
         bpy.ops.object.parent_set(type="ARMATURE_AUTO")
     except RuntimeError as e:
-        fail(f"automatic weighting failed: {e}")
+        fail(f"proxy weighting failed: {e}")
+
+    log("skin", "transferring weights to mesh")
+    # Ensure the real mesh has a vertex group per bone for ARMATURE_NAME binding.
+    existing = {vg.name for vg in obj.vertex_groups}
+    for b in rig.data.bones:
+        if b.name not in existing:
+            obj.vertex_groups.new(name=b.name)
+
+    bpy.ops.object.select_all(action="DESELECT")
+    proxy.select_set(True)
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = proxy   # source = active
+    bpy.ops.object.data_transfer(
+        data_type="VGROUP_WEIGHTS",
+        vert_mapping="POLYINTERP_NEAREST",
+        layers_select_src="ALL",
+        layers_select_dst="NAME",
+        mix_mode="REPLACE",
+    )
+
+    # Bind the real mesh using the transferred weights (no recompute).
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    rig.select_set(True)
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.parent_set(type="ARMATURE_NAME")
+
+    bpy.data.objects.remove(proxy, do_unlink=True)
+    _mask_weights(obj, lm, H)
+    _cleanup_weights(obj)
     log("skin", "skinning complete")
+
+
+def _mask_weights(obj, lm, H):
+    """Force each limb to be self-contained by zeroing impossible weights.
+
+    Bone-heat gives smooth, far-reaching weights that bleed across the body
+    (left leg influencing the right, arms influencing the belly, neck pulling
+    the torso). We hard-clear each bone's weight outside the region it can
+    plausibly own:
+      * left-side limb bones may only weight the body's left half, right-side
+        the right half (this is what keeps the two legs/arms independent);
+      * leg bones may not reach above the hip joint;
+      * arm/hand/finger bones may not reach below the chest;
+      * neck/head may not reach below the neck base.
+    The central spine bones (Hips/Spine/Spine1/Spine2/Chest) are never masked,
+    so every vertex keeps at least one valid influence; normalization restores
+    a clean per-vertex sum afterwards.
+    """
+    fingers = [f"{f}{n}" for f in ("Thumb", "Index", "Middle", "Ring", "Pinky")
+               for n in (1, 2, 3)]
+    arm_parts = ["Shoulder", "UpperArm", "LowerArm", "Hand"] + fingers
+    leg_parts = ["UpperLeg", "LowerLeg", "Foot", "Toe"]
+
+    def named(parts, side):
+        return [f"{p}_{side}" for p in parts]
+
+    L_limbs = named(arm_parts, "L") + named(leg_parts, "L")
+    R_limbs = named(arm_parts, "R") + named(leg_parts, "R")
+    leg_bones = named(leg_parts, "L") + named(leg_parts, "R")
+    arm_bones = named(arm_parts, "L") + named(arm_parts, "R")
+    head_bones = ["Neck", "Head"]
+    spine_bones = ["Hips", "Spine", "Spine1", "Chest"]
+
+    groups = {vg.name: vg for vg in obj.vertex_groups}
+    # Left/right masking (x) is strict — that's what keeps limbs independent.
+    # The vertical bands are deliberately GENEROUS so the torso/neck keep their
+    # natural blending (hard vertical cuts were regressing the spine region).
+    x_margin = 0.015                        # keep a thin midline blend zone
+    # Legs stay OFF the pelvis so the Hips bone owns it as ONE section (else
+    # left/right leg weights split the pelvis down the middle).
+    hips_top = lm["hips_z"] + 0.02 * H
+    neck_bot = lm["neck_z"] - 0.12 * H
+    arm_bot = lm["chest_z"] - 0.16 * H
+
+    # Each spine bone owns a clean vertical band (with blend margin) so the torso
+    # reads as hips / waist / lower-chest / upper-chest, and the chest can't reach
+    # down into the belly and stretch it to a point.
+    sm = 0.05 * H
+    spine_bands = {
+        "Hips":   (None, lm["spine_z"] + sm),
+        "Spine":  (lm["hips_z"] - sm, lm["spine1_z"] + sm),
+        "Spine1": (lm["spine_z"] - sm, lm["chest_z"] + sm),
+        "Chest":  (lm["spine1_z"] - sm, None),
+    }
+
+    idx2name = {vg.index: vg.name for vg in obj.vertex_groups}
+    rm = {name: set() for name in set(L_limbs + R_limbs + leg_bones
+                                      + arm_bones + head_bones + spine_bones)}
+    for v in obj.data.vertices:
+        co = obj.matrix_world @ v.co
+        i = v.index
+        z = co.z
+        remove = set()
+        if co.x < -x_margin:                # right half -> no left-limb weight
+            remove.update(L_limbs)
+        elif co.x > x_margin:               # left half -> no right-limb weight
+            remove.update(R_limbs)
+        if z > hips_top:
+            remove.update(leg_bones)
+        if z < arm_bot:
+            remove.update(arm_bones)
+        if z < neck_bot:
+            remove.update(head_bones)
+        for n, (zmin, zmax) in spine_bands.items():
+            if (zmin is not None and z < zmin) or (zmax is not None and z > zmax):
+                remove.add(n)
+
+        # Never strip a vertex of ALL its weight: an orphaned vertex binds to the
+        # armature root / FBX neutral_bone at the origin and collapses to the
+        # floor between the feet. Keep its dominant influence if masking empties it.
+        cur = {idx2name[g.group]: g.weight for g in v.groups if g.weight > 0.0}
+        if not cur:
+            continue
+        if not (set(cur) - remove):
+            remove.discard(max(cur, key=cur.get))
+        for n in remove:
+            if n in cur:
+                rm[n].add(i)
+
+    for name, idxs in rm.items():
+        vg = groups.get(name)
+        if vg and idxs:
+            vg.remove(list(idxs))
+
+
+def _cleanup_weights(obj):
+    """Normalize so each vertex's weights sum to 1 after masking.
+
+    (Deliberately minimal — limiting/cleaning influences was found to smear
+    separation between parts, so we only normalize.)
+    """
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.vertex_group_normalize_all(group_select_mode="ALL",
+                                              lock_active=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +513,70 @@ def export_glb(path):
         export_yup=True,
     )
     log("export", "done")
+
+
+def export_fbx(path):
+    """Export an engine-friendly FBX (armature + mesh, no baked animation).
+
+    FBX 7.4 binary with a standard humanoid bone hierarchy works broadly —
+    game engines, DCC tools, and figure apps (e.g. Clip Studio, which needs
+    FBX <=7.4) alike. T-pose so downstream auto-mapping lines up.
+    """
+    log("export", f"writing {os.path.basename(path)}")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.export_scene.fbx(
+        filepath=path,
+        use_selection=True,
+        object_types={"ARMATURE", "MESH"},
+        add_leaf_bones=False,        # our Hand/Toe/Head bones are the tips already
+        bake_anim=False,
+        mesh_smooth_type="FACE",
+        apply_unit_scale=True,
+        apply_scale_options="FBX_SCALE_ALL",
+        axis_forward="-Z",
+        axis_up="Y",
+        primary_bone_axis="Y",
+        secondary_bone_axis="X",
+    )
+    log("export", "done (fbx)")
+
+
+# --------------------------------------------------------------------------- #
+# Front view for the Mixamo-style marker editor
+# --------------------------------------------------------------------------- #
+def render_front(obj, out_png, H):
+    """Render an ortho front view and return the pixel<->world calibration."""
+    import math
+    scene = bpy.context.scene
+    res, ortho, cz = 768, 1.95, H / 2.0
+
+    d = bpy.data.lights.new("Sun", "SUN")
+    d.energy = 3.0
+    light = bpy.data.objects.new("Sun", d)
+    scene.collection.objects.link(light)
+    light.rotation_euler = (math.radians(55), 0, math.radians(25))
+
+    cam_data = bpy.data.cameras.new("PrepCam")
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = ortho
+    cam = bpy.data.objects.new("PrepCam", cam_data)
+    scene.collection.objects.link(cam)
+    cam.location = (0.0, -5.0, cz)
+    cam.rotation_euler = (math.radians(90), 0, 0)
+    scene.camera = cam
+
+    scene.render.engine = "BLENDER_WORKBENCH"
+    sh = scene.display.shading
+    sh.light = "STUDIO"
+    sh.color_type = "SINGLE"
+    sh.single_color = (0.82, 0.82, 0.85)
+    scene.render.resolution_x = res
+    scene.render.resolution_y = res
+    scene.render.filepath = out_png
+    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
+    bpy.ops.render.render(write_still=True)
+    return {"res": res, "ortho": ortho, "center_z": cz, "height": H}
 
 
 # --------------------------------------------------------------------------- #
@@ -313,9 +610,41 @@ def main():
     obj = normalize(obj, target_height)
     points = sample_points(obj)
     lm = landmarks.detect_landmarks(points, target_height, log=log)
+
+    # PREP: render a front view and emit draggable markers, then stop. The app
+    # shows these for the user to nudge before the real rig is built.
+    if job.get("mode") == "prep":
+        front_png = job.get("front_png") or (os.path.splitext(output)[0] + "_front.png")
+        calib = render_front(obj, front_png, target_height)
+        world = markers_mod.to_markers(lm)
+        px = {k: markers_mod.world_to_px(v[0], v[1], calib) for k, v in world.items()}
+        with open(output, "w", encoding="utf-8") as f:
+            json.dump({"front": front_png, "calib": calib, "markers": px}, f)
+        log("prep", f"front view + {len(px)} markers written")
+        return
+
+    # RIG: if the app passed edited markers, they override detection.
+    if job.get("markers") and job.get("calib"):
+        calib = job["calib"]
+        world = {k: markers_mod.px_to_world(v[0], v[1], calib)
+                 for k, v in job["markers"].items()}
+        lm = markers_mod.from_markers(world, lm, target_height)
+        log("rig", "using edited markers")
+
     rig = build_skeleton(obj, lm)
-    skin(obj, rig)
+    # Skin with internal bone names (so weight masking can find limbs by role),
+    # then rename bones AND their vertex groups together for the target app.
+    skin(obj, rig, lm, target_height)
+    bone_naming = job.get("bone_naming", "mixamo")
+    csp_bones.rename(rig, bone_naming, obj=obj, log=log)
     export_glb(output)
+    # Also write an FBX sibling for Clip Studio Paint / Modeler. Non-fatal:
+    # a flaky FBX export must not sink an otherwise-good rig + preview.
+    fbx_path = os.path.splitext(output)[0] + ".fbx"
+    try:
+        export_fbx(fbx_path)
+    except Exception as e:  # noqa: BLE001 - report and continue
+        log("export", f"WARNING: FBX export failed, GLB still available: {e}")
     log("done", output)
 
 

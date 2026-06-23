@@ -1,0 +1,16 @@
+{
+  "res": 768,
+  "ortho": 1.95,
+  "center_z": 0.9,
+  "height": 1.8,
+  "front": {
+    "h_axis": "x",
+    "h_sign": 1,
+    "v_axis": "z"
+  },
+  "side": {
+    "h_axis": "y",
+    "h_sign": 1,
+    "v_axis": "z"
+  }
+}

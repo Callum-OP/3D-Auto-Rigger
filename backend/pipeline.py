@@ -203,6 +203,27 @@ def _bone(edit_bones, name, head, tail, parent=None, connected=False):
     return b
 
 
+def clean_mesh(obj):
+    """Make the mesh watertight-ish for clean skinning + CSP compatibility.
+
+    Open holes (non-manifold boundary edges) and stray geometry are a common
+    cause of Clip Studio crashing when it finalizes a character. We merge
+    duplicate verts, fill holes, and make normals consistent.
+    """
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    before = len(obj.data.vertices)
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.remove_doubles(threshold=0.0005)
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.fill_holes(sides=0)
+    bpy.ops.mesh.normals_make_consistent(inside=False)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    log("clean", f"watertight pass ({before} verts -> {len(obj.data.vertices)})")
+
+
 def sample_points(obj):
     """World-space point cloud for analysis, densified if the mesh is low-poly.
 
@@ -249,8 +270,9 @@ def _build_fingers(eb, side, parent, wrist, tip, knuckle):
     hand_len = hand_vec.length or 0.01
     hdir = hand_vec.normalized()
     spread = Vector((0, 1, 0))        # fan across front-back (Y)
-    unit = hand_len * 0.10            # spacing between fingers
-    finger_zone = hand_len * 0.4      # knuckle -> fingertip length (shorter)
+    unit = hand_len * 0.14            # spacing between fingers (wider = easier to
+                                      # select/map individually)
+    finger_zone = hand_len * 0.45     # knuckle -> fingertip length
 
     for fname, yoff, lmul in _FINGERS:
         base = knuckle + spread * (yoff * unit)
@@ -271,9 +293,92 @@ def _build_fingers(eb, side, parent, wrist, tip, knuckle):
         pos = nxt
 
 
-def build_skeleton(obj, lm):
-    """Create a humanoid armature from a detected landmark dict `lm`."""
-    log("skeleton", "assembling armature from landmarks")
+_FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
+
+
+def _detect_hand_span(obj, wrist, tip):
+    """Measure the finger fan from the RAW hand mesh (the sample cloud is
+    subsurf-smoothed, which merges fingers, so we read obj.data.vertices).
+
+    Low-poly hands are too sparse to isolate each finger reliably, but the
+    overall fan is measurable: returns where the fingers spread to (lo..hi along
+    a perpendicular axis) and how far they reach (tip_t along the hand). None on
+    mitten/flat hands so we fall back to the heuristic fan.
+    """
+    hand_vec = tip - wrist
+    hand_len = hand_vec.length
+    if hand_len < 1e-4:
+        return None
+    axis = hand_vec.normalized()
+    mw = obj.matrix_world
+
+    fr = []  # finger region: (t_along_hand, perp_vec)
+    for v in obj.data.vertices:
+        d = (mw @ v.co) - wrist
+        t = d.dot(axis)
+        if t <= hand_len * 0.5 or t > hand_len * 1.8:
+            continue
+        perp = d - axis * t
+        if perp.length < hand_len * 2.0:
+            fr.append((t, perp))
+    if len(fr) < 10:
+        return None
+
+    ys = [s[1].y for s in fr]
+    zs = [s[1].z for s in fr]
+    use_y = (max(ys) - min(ys)) >= (max(zs) - min(zs))
+    vals = ys if use_y else zs
+    spread = max(vals) - min(vals)
+    if spread < hand_len * 0.35:          # no real fan -> mitten -> fallback
+        return None
+    return {
+        "axis": axis, "perp": Vector((0, 1, 0)) if use_y else Vector((0, 0, 1)),
+        "lo": min(vals), "hi": max(vals),
+        "tip_t": max(s[0] for s in fr), "hand_len": hand_len, "wrist": wrist,
+    }
+
+
+def _build_span_fingers(eb, side, parent, span):
+    """Lay 4 fingers across the detected fan + a thumb at the inner end."""
+    axis, perp, wrist = span["axis"], span["perp"], span["wrist"]
+    hand_len, lo, hi, tip_t = span["hand_len"], span["lo"], span["hi"], span["tip_t"]
+    width = hi - lo
+    knuckle_t = hand_len * 0.5
+    mid = (lo + hi) * 0.5
+
+    for i, fname in enumerate(["Index", "Middle", "Ring", "Pinky"]):
+        s_tip = lo + width * (i + 0.5) / 4.0
+        s_base = mid + (s_tip - mid) * 0.3        # fingers fan: base less spread
+        base = wrist + axis * knuckle_t + perp * s_base
+        tipv = wrist + axis * tip_t + perp * s_tip
+        seg = tipv - base
+        prev, pos = parent, base.copy()
+        for j in range(3):
+            nxt = pos + seg * _SEG_FRACS[j]
+            prev = _bone(eb, f"{fname}{j + 1}_{side}", pos, nxt, prev, j > 0)
+            pos = nxt
+
+    # Thumb: shorter, rooted nearer the wrist, offset past the inner finger.
+    base = wrist + axis * (hand_len * 0.25) + perp * (lo - width * 0.15)
+    tipv = wrist + axis * (hand_len * 0.7) + perp * (lo - width * 0.5)
+    seg = tipv - base
+    prev, pos = parent, base.copy()
+    for j in range(3):
+        nxt = pos + seg * _SEG_FRACS[j]
+        prev = _bone(eb, f"Thumb{j + 1}_{side}", pos, nxt, prev, j > 0)
+        pos = nxt
+
+
+def build_skeleton(obj, lm, fingers=False):
+    """Create a humanoid armature from a detected landmark dict `lm`.
+
+    fingers=False (default) builds a single Hand bone per side and no finger
+    bones — a clean ~22-bone humanoid matching the structure of a known-working
+    Clip Studio rig (the reference BVH). The 30 finger bones are what choke
+    CSP's standard-bone-mapping tool, so they're opt-in.
+    """
+    log("skeleton", "assembling armature from landmarks"
+                    + ("" if fingers else " (no fingers)"))
 
     arm = bpy.data.armatures.new("AutoRig")
     rig = bpy.data.objects.new("AutoRig", arm)
@@ -288,7 +393,12 @@ def build_skeleton(obj, lm):
     spine1 = _bone(eb, "Spine1", (0, 0, lm["spine1_z"]), (0, 0, lm["chest_z"]),  spine, True)
     chest  = _bone(eb, "Chest",  (0, 0, lm["chest_z"]),  (0, 0, lm["neck_z"]),   spine1, True)
     neck   = _bone(eb, "Neck",   (0, 0, lm["neck_z"]),   (0, 0, lm["head_z"]),   chest, True)
-    _bone(eb, "Head", (0, 0, lm["head_z"]), (0, 0, lm["head_top_z"]), neck, True)
+    head   = _bone(eb, "Head", (0, 0, lm["head_z"]), (0, 0, lm["head_top_z"]), neck, True)
+    # Forward-pointing face joint (the head-facing-direction target CSP's bone
+    # mapping asks you to assign as part of the head region). Faces -Y (front).
+    head_h = lm["head_top_z"] - lm["head_z"]
+    face_z = lm["head_z"] + 0.4 * head_h
+    _bone(eb, "HeadFace", (0, 0, face_z), (0, -0.8 * head_h, face_z), head, False)
 
     # Arms + legs, mirrored L/R. side sign: +X = left.
     for side, sign in (("L", 1), ("R", -1)):
@@ -303,11 +413,19 @@ def build_skeleton(obj, lm):
                    (sign * lm["wrist_x"], 0, lm["wrist_z"]), ua, True)
         wrist_p = Vector((sign * lm["wrist_x"], 0, lm["wrist_z"]))
         tip_p = Vector((sign * lm["hand_x"], 0, lm["hand_z"]))
-        # Hand bone spans wrist -> knuckles (most of the wrist->fingertip span);
-        # fingers occupy the shorter remainder.
-        knuckle = wrist_p.lerp(tip_p, 0.6)
-        hand = _bone(eb, f"Hand_{side}", wrist_p, knuckle, la, True)
-        _build_fingers(eb, side, hand, wrist_p, tip_p, knuckle)
+        if fingers:
+            # Hand spans wrist -> knuckles; finger bones occupy the remainder.
+            knuckle = wrist_p.lerp(tip_p, 0.6)
+            hand = _bone(eb, f"Hand_{side}", wrist_p, knuckle, la, True)
+            span = _detect_hand_span(obj, wrist_p, tip_p)
+            if span:
+                log("skeleton", f"detected finger fan on {side} hand")
+                _build_span_fingers(eb, side, hand, span)
+            else:
+                _build_fingers(eb, side, hand, wrist_p, tip_p, knuckle)
+        else:
+            # Single hand bone (wrist -> fingertips) — no finger bones.
+            _bone(eb, f"Hand_{side}", wrist_p, tip_p, la, True)
 
         ul = _bone(eb, f"UpperLeg_{side}",
                    (sign * lm["hip_x"], 0, lm["hips_z"]),
@@ -427,12 +545,12 @@ def _mask_weights(obj, lm, H):
     # Left/right masking (x) is strict — that's what keeps limbs independent.
     # The vertical bands are deliberately GENEROUS so the torso/neck keep their
     # natural blending (hard vertical cuts were regressing the spine region).
-    x_margin = 0.015                        # keep a thin midline blend zone
+    x_margin = 0.008                        # tight midline so L/R don't cross
     # Legs stay OFF the pelvis so the Hips bone owns it as ONE section (else
     # left/right leg weights split the pelvis down the middle).
     hips_top = lm["hips_z"] + 0.02 * H
-    neck_bot = lm["neck_z"] - 0.12 * H
-    arm_bot = lm["chest_z"] - 0.16 * H
+    neck_bot = lm["neck_z"] - 0.06 * H      # head/neck stop above the shoulders
+    arm_bot = lm["chest_z"] - 0.12 * H
 
     # Each spine bone owns a clean vertical band (with blend margin) so the torso
     # reads as hips / waist / lower-chest / upper-chest, and the chest can't reach
@@ -486,16 +604,64 @@ def _mask_weights(obj, lm, H):
 
 
 def _cleanup_weights(obj):
-    """Normalize so each vertex's weights sum to 1 after masking.
+    """Cap influences and soften hard mask boundaries (CSP/engine-friendly).
 
-    (Deliberately minimal — limiting/cleaning influences was found to smear
-    separation between parts, so we only normalize.)
+    - manual edge smooth: blends the HARD mask boundaries so vertices at a zone
+      edge don't tear/stretch apart when posed (the "sticking out" artifact).
+      Done by hand because Blender's vertex_group_smooth operator can't run in
+      headless --background (it needs a viewport context).
+    - limit to 4 influences/vertex: CSP and game engines cap bone influences;
+      too many can make CSP crash when finalizing the rig.
     """
+    _smooth_weights(obj, iterations=1, factor=0.3)
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.vertex_group_limit_total(group_select_mode="ALL", limit=4)
     bpy.ops.object.vertex_group_normalize_all(group_select_mode="ALL",
                                               lock_active=False)
+
+
+def _smooth_weights(obj, iterations=2, factor=0.5):
+    """Laplacian-style weight smoothing across mesh edges (headless-safe)."""
+    me = obj.data
+    n = len(me.vertices)
+    neighbors = [[] for _ in range(n)]
+    for e in me.edges:
+        a, b = e.vertices
+        neighbors[a].append(b)
+        neighbors[b].append(a)
+
+    weights = [dict() for _ in range(n)]
+    for v in me.vertices:
+        for g in v.groups:
+            if g.weight > 0.0:
+                weights[v.index][g.group] = g.weight
+
+    for _ in range(iterations):
+        nxt = [dict() for _ in range(n)]
+        for vi in range(n):
+            acc = {}
+            for gi, w in weights[vi].items():
+                acc[gi] = acc.get(gi, 0.0) + (1.0 - factor) * w
+            nb = neighbors[vi]
+            if nb:
+                f = factor / len(nb)
+                for ni in nb:
+                    for gi, w in weights[ni].items():
+                        acc[gi] = acc.get(gi, 0.0) + f * w
+            nxt[vi] = acc
+        weights = nxt
+
+    groups = list(obj.vertex_groups)
+    for vi in range(n):
+        idx = [vi]
+        for vg in groups:
+            w = weights[vi].get(vg.index, 0.0)
+            if w > 0.0005:
+                vg.add(idx, w, "REPLACE")
+            else:
+                vg.remove(idx)
 
 
 # --------------------------------------------------------------------------- #
@@ -529,7 +695,9 @@ def export_fbx(path):
         filepath=path,
         use_selection=True,
         object_types={"ARMATURE", "MESH"},
-        add_leaf_bones=False,        # our Hand/Toe/Head bones are the tips already
+        add_leaf_bones=True,         # CSP's standard skeleton expects end bones
+                                     # (head_end, finger ends, toe ends) — same as
+                                     # the reference BVH's End Sites
         bake_anim=False,
         mesh_smooth_type="FACE",
         apply_unit_scale=True,
@@ -608,6 +776,7 @@ def main():
 
     obj = join_meshes(meshes)
     obj = normalize(obj, target_height)
+    clean_mesh(obj)
     points = sample_points(obj)
     lm = landmarks.detect_landmarks(points, target_height, log=log)
 
@@ -631,7 +800,7 @@ def main():
         lm = markers_mod.from_markers(world, lm, target_height)
         log("rig", "using edited markers")
 
-    rig = build_skeleton(obj, lm)
+    rig = build_skeleton(obj, lm, fingers=bool(job.get("fingers", True)))
     # Skin with internal bone names (so weight masking can find limbs by role),
     # then rename bones AND their vertex groups together for the target app.
     skin(obj, rig, lm, target_height)

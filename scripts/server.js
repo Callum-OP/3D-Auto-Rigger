@@ -95,7 +95,7 @@ async function handleRig(req, res) {
   if (!sess) return sendJSON(res, 400, { error: "unknown session — run prep first" });
 
   const out = tmp(`uprig_rigged_${Date.now()}.glb`);
-  const fields = { output: out };
+  const fields = { output: out, fingers: body.fingers !== false };
   if (sess.modelPath) fields.input = sess.modelPath;
   if (body.markers && body.calib) { fields.markers = body.markers; fields.calib = body.calib; }
 

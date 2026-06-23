@@ -7,6 +7,8 @@ const testBtn = document.getElementById("testBtn");
 const rigBtn = document.getElementById("rigBtn");
 const buildBtn = document.getElementById("buildBtn");
 const backBtn = document.getElementById("backBtn");
+const fingersChk = document.getElementById("fingersChk");
+const fingersRow = document.getElementById("fingersRow");
 const saveBtn = document.getElementById("saveBtn");
 const saveFbxBtn = document.getElementById("saveFbxBtn");
 const inputName = document.getElementById("inputName");
@@ -59,6 +61,7 @@ function setPhase(phase) {
   editor.classList.toggle("hidden", !editing);
   rigBtn.classList.toggle("hidden", editing);
   buildBtn.classList.toggle("hidden", !editing);
+  fingersRow.classList.toggle("hidden", !editing);
   backBtn.classList.toggle("hidden", !editing);
   if (editing) viewerPlaceholder.style.display = "none";
 }
@@ -190,7 +193,7 @@ async function startRig() {
     const data = await jsonFetch("/api/rig", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, markers, calib }),
+      body: JSON.stringify({ token, markers, calib, fingers: fingersChk.checked }),
     });
     glbDownload = data.glbDownload;
     fbxDownload = data.fbxDownload || null;

@@ -35,6 +35,7 @@ def build(inp):
     meshes = pipeline.import_model(inp) if inp and os.path.exists(inp) else pipeline.make_test_human()
     obj = pipeline.join_meshes(meshes)
     obj = pipeline.normalize(obj, HEIGHT)
+    pipeline.clean_mesh(obj)
     pts = pipeline.sample_points(obj)
     lm = landmarks.detect_landmarks(pts, HEIGHT, log=pipeline.log)
     rig = pipeline.build_skeleton(obj, lm)        # internal bone names kept

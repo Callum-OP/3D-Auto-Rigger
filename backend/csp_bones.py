@@ -29,6 +29,7 @@ MIXAMO = {
     "Chest": "Spine2",
     "Neck": "Neck",
     "Head": "Head",
+    "HeadFace": "HeadFace",
     "Shoulder_L": "LeftShoulder",
     "UpperArm_L": "LeftArm",
     "LowerArm_L": "LeftForeArm",

@@ -26,15 +26,17 @@ MIXAMO = {
     "Hips": "Hips",
     "Spine": "Spine",
     "Spine1": "Spine1",
-    "Chest": "Spine2",
+    "Spine2": "Spine2",
     "Neck": "Neck",
     "Head": "Head",
     "HeadFace": "HeadFace",
-    "Shoulder_L": "LeftShoulder",
+    "Clavicle_L": "LeftShoulder",
+    "Shoulder_L": "LeftShoulder2",
     "UpperArm_L": "LeftArm",
     "LowerArm_L": "LeftForeArm",
     "Hand_L": "LeftHand",
-    "Shoulder_R": "RightShoulder",
+    "Clavicle_R": "RightShoulder",
+    "Shoulder_R": "RightShoulder2",
     "UpperArm_R": "RightArm",
     "LowerArm_R": "RightForeArm",
     "Hand_R": "RightHand",
@@ -56,18 +58,29 @@ for _side, _prefix in (("L", "Left"), ("R", "Right")):
             MIXAMO[f"{_finger}{_n}_{_side}"] = f"{_prefix}Hand{_finger}{_n}"
 
 # Internal name -> Clip Studio Standard Bone Specification name.
-# CONFIRMED from Celsys docs: hips_bb_, spine_bb_, spine1_bb_.
-# Everything else below is a PLACEHOLDER following the observed pattern and
-# MUST be verified against the Standard Bone Specification before use.
+#
+# If the FBX bones carry these EXACT names + the right coordinate axes, Modeler
+# AUTO-RECOGNISES the skeleton on import — no manual region mapping, no crashing
+# "Complete as character" step. This is the path around the Blender-FBX crash.
+#
+# Rules confirmed from Celsys docs (the full list is a gated JP-only PDF):
+#   * suffix every standard bone with "_bb_"
+#   * tip/end bones use "_end_bb_"
+#   * coordinate system: right-handed Y-UP (Maya convention)
+# CONFIRMED exact names: hips_bb_, spine_bb_, spine1_bb_, head_bb_, head_end_bb_.
+# The limb names below are GUESSES (real spec may use different words, e.g.
+# "arm" vs "upperarm", "thigh" vs "upleg") — auto-recognition is exact-match, so
+# these MUST be replaced with the real names read from Modeler's "Create
+# Standard Bones" output before this scheme can work. INTENTIONALLY INCOMPLETE.
 CSP_BB = {
     "Hips": "hips_bb_",         # confirmed
     "Spine": "spine_bb_",       # confirmed
     "Spine1": "spine1_bb_",     # confirmed
-    # --- below: VERIFY against the spec / Modeler before enabling ---
-    # "Chest":      "spine2_bb_",
+    "Head": "head_bb_",         # confirmed
+    # --- below: GUESSES — replace with the real names from Modeler ---
+    # "Spine2":     "spine2_bb_",
     # "Neck":       "neck_bb_",
-    # "Head":       "head_bb_",
-    # "Shoulder_L": "shoulder_l_bb_",
+    # "Clavicle_L": "shoulder_l_bb_",
     # "UpperArm_L": "arm_l_bb_",
     # "LowerArm_L": "forearm_l_bb_",
     # "Hand_L":     "hand_l_bb_",
@@ -75,7 +88,7 @@ CSP_BB = {
     # "LowerLeg_L": "leg_l_bb_",
     # "Foot_L":     "foot_l_bb_",
     # "Toe_L":      "toe_l_bb_",
-    # (+ R side)
+    # (+ R side, fingers, and *_end_bb_ tips)
 }
 
 SCHEMES = {"mixamo": MIXAMO, "csp_bb": CSP_BB, "internal": None}

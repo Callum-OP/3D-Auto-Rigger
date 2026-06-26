@@ -8,7 +8,7 @@
   </head>
   <body>
     <header>
-      <h1>3D Auto&nbsp;Rigger <span class="tag">humanoid body rig · runs in your browser</span></h1>
+      <h1>3D Auto&nbsp;Rigger <span class="tag">humanoid body rig + ARKit face shapes · runs in your browser</span></h1>
     </header>
 
     <main>
@@ -20,6 +20,12 @@
           <button id="browseBtn" class="btn">Browse…</button>
           <p class="drop-or">or</p>
           <button id="testBtn" class="btn btn-ghost">Rig a test figure</button>
+          <div class="input-type" id="inputType">
+            <span class="input-type-label">Input is a</span>
+            <button class="btn input-type-btn active" id="typeBodyBtn" type="button">full body</button>
+            <button class="btn input-type-btn" id="typeHeadBtn" type="button">head only</button>
+          </div>
+          <p class="drop-sub" id="inputTypeHint">Body → skeleton + optional face shapes. Head only → ARKit face shapes, no skeleton.</p>
         </div>
       </section>
 
@@ -42,11 +48,20 @@
               <img id="editorImg" class="editor-img" alt="front view" />
               <div id="markerLayer" class="marker-layer"></div>
             </div>
+            <div id="zoomCtl" class="zoom-ctl hidden">
+              <button id="zoomInBtn" class="zoom-btn" type="button" title="Zoom in">+</button>
+              <button id="zoomOutBtn" class="zoom-btn" type="button" title="Zoom out">−</button>
+            </div>
+            <div id="groupCtl" class="group-ctl hidden">
+              <span class="group-lbl">All markers</span>
+              <button id="grpScaleUp" class="zoom-btn" type="button" title="Scale markers bigger">⊕</button>
+              <button id="grpScaleDown" class="zoom-btn" type="button" title="Scale markers smaller">⊖</button>
+            </div>
             <label class="editor-mirror">
               <input type="checkbox" id="mirrorChk" checked />
               Mirror left/right
             </label>
-            <p class="editor-hint">
+            <p class="editor-hint" id="editorHint">
               Drag each dot onto the matching joint, then Build rig.
             </p>
           </div>
@@ -63,6 +78,15 @@
             <input type="checkbox" id="fingersChk" checked />
             Finger bones (needed for Clip Studio)
           </label>
+          <label class="opt-row hidden" id="faceRow">
+            <input type="checkbox" id="faceChk" />
+            Facial shape keys (ARKit&nbsp;52)
+          </label>
+          <div class="mode-row hidden" id="modeRow">
+            <button class="btn mode-btn active" id="bodyModeBtn" type="button">Body joints</button>
+            <button class="btn mode-btn" id="faceModeBtn" type="button">Face</button>
+          </div>
+          <button id="resetBtn" class="btn hidden">↺ Reset markers</button>
           <button id="backBtn" class="btn hidden">← Back</button>
           <button id="saveFbxBtn" class="btn btn-accent" disabled>Download .fbx</button>
           <button id="saveBtn" class="btn" disabled>Download .glb</button>

@@ -4,7 +4,8 @@
   "description": "Automatically rig humanoid 3D models for animation",
   "scripts": {
     "start": "node scripts/server.js",
-    "rig": "node scripts/cli.js"
+    "rig": "node scripts/cli.js",
+    "face": "node scripts/face.js"
   },
   "author": "",
   "license": "MIT",

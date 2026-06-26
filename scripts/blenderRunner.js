@@ -124,4 +124,18 @@ function runJob(fields, onLog) {
   });
 }
 
-module.exports = { runRig, runJob, loadConfig, detectBlender };
+/**
+ * Add ARKit-52 face shape keys to a model — no rigging (face_only stage).
+ * @param {object}   opts
+ * @param {string}   [opts.input]   absolute path to the source head/body model
+ * @param {string}   opts.output    absolute path for the output .glb
+ * @param {function} [opts.onLog]   called with each parsed log line {stage,msg}
+ * @returns {Promise<{output:string}>}
+ */
+function runFace({ input, output, onLog }) {
+  const fields = { output, face_only: true };
+  if (input) fields.input = input;
+  return runJob(fields, onLog);
+}
+
+module.exports = { runRig, runFace, runJob, loadConfig, detectBlender };

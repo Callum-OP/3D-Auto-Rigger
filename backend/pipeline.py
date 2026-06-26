@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import landmarks
 import csp_bones
 import markers as markers_mod
+import face_markers
+import face_shapekeys
 
 
 # --------------------------------------------------------------------------- #
@@ -923,6 +925,43 @@ def render_front(obj, out_png, H):
 
 
 # --------------------------------------------------------------------------- #
+# Face shape keys (ARKit 52) — optional stage, shares the marker mechanism.
+# --------------------------------------------------------------------------- #
+def add_face_shapekeys(obj, job, lm, H):
+    pts = [obj.matrix_world @ v.co for v in obj.data.vertices]
+    base_z, top_z, head_only = face_markers.head_band(pts, lm)
+    # The face_only job comes from the UI's "head only" choice — trust it over
+    # the landmark guess (which misreads stylized heads).
+    if job.get("face_only"):
+        head_only = True
+    if head_only:
+        base_z, top_z = min(p.z for p in pts), max(p.z for p in pts)
+        log("face", "treating the whole input as a head")
+    # Edited markers from the app override the auto-detected default layout.
+    if job.get("face_markers") and job.get("calib"):
+        log("face", "using edited face markers")
+        marks = face_markers.from_px(job["face_markers"], job["calib"])
+    else:
+        det_base, det_top = face_markers.detection_band(base_z, top_z, head_only, H)
+        face = face_markers.detect_face(pts, det_base, det_top)
+        marks = face_markers.default_markers(face)
+    face_shapekeys.build(obj, marks, H, head_base=base_z,
+                         sets=job.get("face_sets"), log=log)
+
+
+def export_all(obj, output):
+    """Write the preview GLB and a CSP-safe FBX sibling (FBX failure is non-fatal
+    so a flaky export can't sink an otherwise-good result)."""
+    export_glb(output)
+    fbx_path = os.path.splitext(output)[0] + ".fbx"
+    try:
+        simplify_materials(obj)         # CSP can crash on the original materials
+        export_fbx(fbx_path)
+    except Exception as e:  # noqa: BLE001 - report and continue
+        log("export", f"WARNING: FBX export failed, GLB still available: {e}")
+
+
+# --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
 def parse_args():
@@ -962,9 +1001,26 @@ def main():
         calib = render_front(obj, front_png, target_height)
         world = markers_mod.to_markers(lm)
         px = {k: markers_mod.world_to_px(v[0], v[1], calib) for k, v in world.items()}
+        # Auto-detected face anchors on the same front image, for the editor.
+        fb_z, ft_z, fo = face_markers.head_band(points, lm)
+        if job.get("head_only"):
+            fo = True
+            fb_z, ft_z = min(p.z for p in points), max(p.z for p in points)
+        db, dt = face_markers.detection_band(fb_z, ft_z, fo, target_height)
+        face = face_markers.detect_face(points, db, dt)
+        face_px = face_markers.to_px(face_markers.default_markers(face), calib)
         with open(output, "w", encoding="utf-8") as f:
-            json.dump({"front": front_png, "calib": calib, "markers": px}, f)
-        log("prep", f"front view + {len(px)} markers written")
+            json.dump({"front": front_png, "calib": calib,
+                       "markers": px, "face_markers": face_px}, f)
+        log("prep", f"front view + {len(px)} body + {len(face_px)} face markers")
+        return
+
+    # FACE-ONLY: add ARKit shape keys to the mesh and export — no rigging.
+    # Gives a standalone "face tool" out of the same pipeline (one codebase).
+    if job.get("face_only"):
+        add_face_shapekeys(obj, job, lm, target_height)
+        export_all(obj, output)
+        log("done", output)
         return
 
     # RIG: if the app passed edited markers, they override detection.
@@ -981,15 +1037,14 @@ def main():
     skin(obj, rig, lm, target_height)
     bone_naming = job.get("bone_naming", "mixamo")
     csp_bones.rename(rig, bone_naming, obj=obj, log=log)
-    export_glb(output)
-    # Also write an FBX sibling for Clip Studio Paint / Modeler. Non-fatal:
-    # a flaky FBX export must not sink an otherwise-good rig + preview.
-    fbx_path = os.path.splitext(output)[0] + ".fbx"
-    try:
-        simplify_materials(obj)         # CSP can crash on the original materials
-        export_fbx(fbx_path)
-    except Exception as e:  # noqa: BLE001 - report and continue
-        log("export", f"WARNING: FBX export failed, GLB still available: {e}")
+
+    # FACE: optional ARKit shape keys on the same mesh, so the exported character
+    # both poses (armature) and emotes (shape keys). Built after skinning so the
+    # keys ride on the final mesh/vertex order.
+    if job.get("face_shapekeys"):
+        add_face_shapekeys(obj, job, lm, target_height)
+
+    export_all(obj, output)
     log("done", output)
 
 

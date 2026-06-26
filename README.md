@@ -40,11 +40,17 @@ Then in the browser: drop a model (or "Rig a test figure") → **Rig model** →
 drag the joint markers onto the right spots → **Build rig** → download the
 `.glb` / `.fbx`.
 
+To also generate facial blendshapes, tick **Facial shape keys (ARKit 52)** in the
+editor, switch the overlay to **Face** (zooms onto the head), drag the face
+anchors onto eyes / brows / nose / lips / chin, then Build. The output carries
+both the armature and the 52 ARKit shape keys on one mesh.
+
 Headless / no UI:
 
 ```sh
 npm run rig -- path/to/model.glb  rigged.glb
 npm run rig                       # rig a generated test figure
+npm run face -- path/to/model.glb face.glb   # ARKit-52 shape keys only, no rig
 ```
 
 ## How it works
@@ -56,6 +62,10 @@ npm run rig                       # rig a generated test figure
 3. **Build** — Blender fits the humanoid skeleton to your markers, skins it via
    a watertight voxel-proxy weight transfer with region masking, and exports
    GLB + FBX.
+4. **Face (optional)** — from the face markers, `backend/face_shapekeys.py`
+   builds the 52 ARKit blendshapes as shape keys (marker-driven: each anchor
+   snaps to the surface and defines a deformation region; jaw/eyes/brows/mouth
+   recipes in `arkit.py` order). Validate with `backend/preview_face.py`.
 
 ## Supported input formats
 

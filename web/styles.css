@@ -64,6 +64,21 @@ main {
 .drop-title { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
 .drop-sub { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
 .drop-or { margin: 8px 0 6px; color: var(--muted); font-size: 12px; }
+.input-type {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 12px 0 2px;
+}
+.input-type-label { color: var(--muted); font-size: 12px; }
+.input-type .input-type-btn { padding: 5px 12px; font-size: 12px; }
+.input-type-btn.active {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+  font-weight: 600;
+}
 
 /* stage = viewer + side panel */
 .stage {
@@ -125,6 +140,46 @@ model-viewer {
   border-radius: 8px;
   background: #2a2a34;
 }
+.editor-stage { transition: transform 0.15s ease; }
+.zoom-ctl {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 3;
+}
+.zoom-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  border-radius: 6px;
+  background: rgba(20, 20, 26, 0.85);
+  border: 1px solid var(--line);
+  color: var(--text);
+  cursor: pointer;
+}
+.zoom-btn:hover { border-color: var(--accent); }
+.group-ctl {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 3;
+}
+.group-ctl .group-lbl {
+  font-size: 11px;
+  color: var(--text);
+  background: rgba(20, 20, 26, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
 .marker-layer { position: absolute; inset: 0; }
 .marker {
   position: absolute;
@@ -137,9 +192,21 @@ model-viewer {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
   cursor: grab;
   touch-action: none;
+  /* counter the editor-stage zoom so dots stay a constant on-screen size */
+  transform: scale(var(--marker-scale, 1));
 }
 .marker:active { cursor: grabbing; }
 .marker-center { background: var(--ok); }
+.marker.selected {
+  border-color: #ffd24a;
+  box-shadow: 0 0 0 2px #ffd24a, 0 0 0 3px rgba(0, 0, 0, 0.5);
+}
+.select-box {
+  position: absolute;
+  border: 1px dashed #ffd24a;
+  background: rgba(255, 210, 74, 0.12);
+  pointer-events: none;
+}
 .marker-label {
   position: absolute;
   left: 15px;
@@ -163,6 +230,8 @@ model-viewer {
   color: var(--text);
   cursor: pointer;
   user-select: none;
+  position: relative;
+  z-index: 2;                 /* stay above the (zoomed) face stage */
 }
 .editor-mirror input { cursor: pointer; }
 .opt-row {
@@ -176,11 +245,21 @@ model-viewer {
   user-select: none;
 }
 .opt-row input { cursor: pointer; }
+.mode-row { display: flex; gap: 8px; margin: 0 0 8px; }
+.mode-row .mode-btn { flex: 1; padding: 7px; font-size: 12px; margin: 0; }
+.mode-btn.active {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+  font-weight: 600;
+}
 .editor-hint {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+  position: relative;
+  z-index: 2;                 /* stay above the (zoomed) face stage */
 }
 
 /* panel */

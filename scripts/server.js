@@ -75,6 +75,7 @@ async function handlePrep(req, res, url) {
   const frontPng = tmp(`uprig_front_${stamp}.png`);
   const fields = { mode: "prep", output: markersJson, front_png: frontPng };
   if (modelPath) fields.input = modelPath;
+  if (url.searchParams.get("headOnly") === "1") fields.head_only = true;
 
   await runJob(fields, (e) => console.log(`[prep] ${e.stage}: ${e.msg}`));
   const data = JSON.parse(fs.readFileSync(markersJson, "utf-8"));
@@ -84,6 +85,7 @@ async function handlePrep(req, res, url) {
   sendJSON(res, 200, {
     token: session,
     markers: data.markers,
+    faceMarkers: data.face_markers,
     calib: data.calib,
     frontUrl: "/files/" + registerFile(frontPng),
   });
@@ -95,9 +97,27 @@ async function handleRig(req, res) {
   if (!sess) return sendJSON(res, 400, { error: "unknown session — run prep first" });
 
   const out = tmp(`uprig_rigged_${Date.now()}.glb`);
-  const fields = { output: out, fingers: body.fingers !== false };
+  const fields = { output: out };
   if (sess.modelPath) fields.input = sess.modelPath;
-  if (body.markers && body.calib) { fields.markers = body.markers; fields.calib = body.calib; }
+
+  if (body.headOnly) {
+    // Head-only input: add ARKit shape keys, NO skeleton/skinning.
+    fields.face_only = true;
+    if (body.faceMarkers && body.calib) {
+      fields.face_markers = body.faceMarkers;
+      fields.calib = body.calib;
+    }
+  } else {
+    fields.fingers = body.fingers !== false;
+    if (body.markers && body.calib) { fields.markers = body.markers; fields.calib = body.calib; }
+    if (body.faceShapekeys) {
+      fields.face_shapekeys = true;
+      if (body.faceMarkers && body.calib) {
+        fields.face_markers = body.faceMarkers;
+        fields.calib = body.calib;          // face markers resolve via the calib
+      }
+    }
+  }
 
   await runJob(fields, (e) => console.log(`[rig] ${e.stage}: ${e.msg}`));
 

@@ -26,6 +26,10 @@ const faceChk = document.getElementById("faceChk");
 const modeRow = document.getElementById("modeRow");
 const bodyModeBtn = document.getElementById("bodyModeBtn");
 const faceModeBtn = document.getElementById("faceModeBtn");
+const handsModeBtn = document.getElementById("handsModeBtn");
+const handSideRow = document.getElementById("handSideRow");
+const handLBtn = document.getElementById("handLBtn");
+const handRBtn = document.getElementById("handRBtn");
 const editorHint = document.getElementById("editorHint");
 const typeBodyBtn = document.getElementById("typeBodyBtn");
 const typeHeadBtn = document.getElementById("typeHeadBtn");
@@ -41,14 +45,19 @@ const logEl = document.getElementById("log");
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const cloneMarkers = (m) => (m ? JSON.parse(JSON.stringify(m)) : null);
 
-let bodyMarkersOrig = null, faceMarkersOrig = null;  // auto-detected, for Reset
+let bodyMarkersOrig = null, faceMarkersOrig = null, handMarkersOrig = null;
 let selected = new Set();                            // box-selected marker names
 
 let selectedFile = null;          // File or null (test figure)
 let token = null;                 // prep session token
-let bodyMarkers = null, faceMarkers = null;  // the two editable marker sets
-let calib = null;                 // pixel<->world calibration (shared)
-let editMode = "body";            // which set the overlay is editing
+let bodyMarkers = null, faceMarkers = null;  // body joints + face anchors
+let handMarkers = null;           // {L:{finger:[px,py]}, R:{...}} fingertip markers
+let handCalib = null;             // {L:{...}, R:{...}} per-hand-view calibration
+let handViews = null;             // {L:url, R:url} hand close-up images
+let handSide = "L";               // which hand the editor is showing
+let frontUrl = null;              // front-view image url (body/face modes)
+let calib = null;                 // front-view pixel<->world calibration
+let editMode = "body";            // "body" | "face" | "hands"
 let inputType = "body";           // "body" (rig) or "head" (face shapes only)
 let faceZoomMult = 1;             // user zoom multiplier on top of the auto-fit
 let glbDownload = null, fbxDownload = null;
@@ -80,10 +89,26 @@ const FACE_LABELS = {
   mouth_corner_l: "L mouth", mouth_corner_r: "R mouth",
 };
 
-// The active marker set / center-set / labels, per current edit mode.
-const cur = () => (editMode === "face" ? faceMarkers : bodyMarkers);
-const curCenter = () => (editMode === "face" ? FACE_CENTER : CENTER);
-const curLabels = () => (editMode === "face" ? FACE_LABELS : LABELS);
+// Fingertip markers (top-down hand view). All free-drag (no center-locked ones).
+const FINGER_LABELS = {
+  Thumb: "thumb", Index: "index", Middle: "middle", Ring: "ring", Pinky: "pinky",
+};
+const NO_CENTER = new Set();
+
+// The active marker set / center-set / labels / calibration, per edit mode.
+// Hands use their own per-side image and calibration (top-down close-up);
+// body & face share the front view.
+const cur = () =>
+  editMode === "face" ? faceMarkers
+  : editMode === "hands" ? (handMarkers && handMarkers[handSide])
+  : bodyMarkers;
+const curCenter = () =>
+  editMode === "face" ? FACE_CENTER : editMode === "hands" ? NO_CENTER : CENTER;
+const curLabels = () =>
+  editMode === "face" ? FACE_LABELS : editMode === "hands" ? FINGER_LABELS : LABELS;
+const curCalib = () =>
+  (editMode === "hands" && handCalib) ? handCalib[handSide] : calib;
+const RES = () => curCalib().res;
 
 // --- logging -------------------------------------------------------------- //
 function addLog(stage, msg, kind = "") {
@@ -120,17 +145,22 @@ function setPhase(phase) {
 
   if (!editing) {
     modeRow.classList.add("hidden");
+    handSideRow.classList.add("hidden");
     zoomCtl.classList.add("hidden");
+    groupCtl.classList.add("hidden");
     setMode("body");
     return;
   }
 
   buildBtn.textContent = head ? "Build face shapes" : "Build rig from markers";
-  modeRow.classList.add("hidden");      // the body/face switch is body-mode only
   if (head) {
-    faceChk.checked = true;             // head-only always builds face shapes
+    modeRow.classList.add("hidden");    // head-only: face markers only
+    faceChk.checked = true;
     setMode("face");
   } else {
+    modeRow.classList.remove("hidden");
+    faceModeBtn.classList.toggle("hidden", !faceChk.checked);
+    handsModeBtn.classList.toggle("hidden", !(fingersChk.checked && handViews));
     setMode("body");
   }
 }
@@ -186,9 +216,14 @@ async function startPrep() {
     bodyMarkers = data.markers;
     faceMarkers = data.faceMarkers || null;
     calib = data.calib;
-    editorImg.src = data.frontUrl;
+    frontUrl = data.frontUrl;
+    handMarkers = data.fingerMarkers || null;
+    handCalib = data.handCalib || null;
+    handViews = data.handViews || null;
+    handSide = "L";
     bodyMarkersOrig = cloneMarkers(data.markers);
     faceMarkersOrig = cloneMarkers(data.faceMarkers || null);
+    handMarkersOrig = cloneMarkers(data.fingerMarkers || null);
     selected.clear();
     faceChk.checked = false;
     faceZoomMult = 1;
@@ -222,8 +257,9 @@ function renderMarkers() {
 }
 
 function positionDot(dot, [px, py]) {
-  dot.style.left = (px / calib.res) * 100 + "%";
-  dot.style.top = (py / calib.res) * 100 + "%";
+  const r = RES();
+  dot.style.left = (px / r) * 100 + "%";
+  dot.style.top = (py / r) * 100 + "%";
 }
 function refreshDots() {
   const set = cur();
@@ -231,13 +267,23 @@ function refreshDots() {
 }
 function mirror(name, px, py) {
   if (!mirrorChk.checked) return;
+  const R = RES();
+  if (editMode === "hands") {
+    // Hands: copy the fingertip to the OTHER hand (its view is a horizontal
+    // mirror, so flip x). Both hand views share res/ortho, centred per hand.
+    const other = handSide === "L" ? "R" : "L";
+    if (handMarkers[other] && handMarkers[other][name]) {
+      handMarkers[other][name] = [R - px, py];
+    }
+    return;
+  }
   const set = cur();
   if (name.endsWith("_l")) {
     const r = name.slice(0, -2) + "_r";
-    if (set[r]) set[r] = [calib.res - px, py];
+    if (set[r]) set[r] = [R - px, py];
   } else if (name.endsWith("_r")) {
     const l = name.slice(0, -2) + "_l";
-    if (set[l]) set[l] = [calib.res - px, py];
+    if (set[l]) set[l] = [R - px, py];
   }
 }
 function attachDrag(dot, name) {
@@ -253,11 +299,12 @@ function attachDrag(dot, name) {
     if (selected.size) { selected.clear(); updateSelectionClasses(); }
     const move = (ev) => {
       const rect = markerLayer.getBoundingClientRect();
+      const r = RES();
       let fx = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
       const fy = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
-      let px = fx * calib.res;
-      const py = fy * calib.res;
-      if (curCenter().has(name)) px = calib.res / 2;
+      let px = fx * r;
+      const py = fy * r;
+      if (curCenter().has(name)) px = r / 2;
       cur()[name] = [px, py];
       mirror(name, px, py);
       refreshDots();
@@ -271,19 +318,40 @@ function attachDrag(dot, name) {
   });
 }
 
-// --- body/face mode switch + zoom-to-face --------------------------------- //
+// --- edit-mode switch (body / face / hands) ------------------------------- //
 function setMode(mode) {
-  editMode = faceMarkers ? mode : "body";
-  bodyModeBtn.classList.toggle("active", editMode === "body");
-  faceModeBtn.classList.toggle("active", editMode === "face");
-  editorHint.textContent = editMode === "face"
-    ? "Drag a dot · Shift-drag to box-select · drag empty space to move all/selection · ⊕/⊖ scale · scroll to zoom."
+  if (mode === "face" && !faceMarkers) mode = "body";
+  if (mode === "hands" && !(handMarkers && handViews)) mode = "body";
+  editMode = mode;
+  bodyModeBtn.classList.toggle("active", mode === "body");
+  faceModeBtn.classList.toggle("active", mode === "face");
+  handsModeBtn.classList.toggle("active", mode === "hands");
+  handSideRow.classList.toggle("hidden", mode !== "hands");
+  editorImg.src = mode === "hands" ? handViews[handSide] : frontUrl;
+  const overlay = mode === "face" || mode === "hands";
+  editorHint.textContent =
+    mode === "hands" ? "Drag each dot onto the real fingertip · Mirror copies to the other hand · scroll to zoom."
+    : mode === "face" ? "Drag a dot · Shift-drag to box-select · drag empty to move all · ⊕/⊖ scale · scroll to zoom."
     : "Drag each dot onto the matching joint, then Build rig.";
-  zoomCtl.classList.toggle("hidden", editMode !== "face");
-  groupCtl.classList.toggle("hidden", editMode !== "face");
+  zoomCtl.classList.toggle("hidden", !overlay);
+  groupCtl.classList.toggle("hidden", mode !== "face");  // group tools: face only
   selected.clear();
-  applyZoom(editMode === "face");
+  faceZoomMult = 1;
+  applyZoom(overlay);
   renderMarkers();
+}
+
+function setHandSide(s) {
+  handSide = s;
+  handLBtn.classList.toggle("active", s === "L");
+  handRBtn.classList.toggle("active", s === "R");
+  if (editMode === "hands") {
+    editorImg.src = handViews[s];
+    selected.clear();
+    faceZoomMult = 1;
+    applyZoom(true);
+    renderMarkers();
+  }
 }
 
 function updateSelectionClasses() {
@@ -296,13 +364,14 @@ function updateSelectionClasses() {
 // (each-marker clamping would distort the shape).
 function moveSet(names, dpx, dpy) {
   const set = cur();
+  const r = RES();
   let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
   for (const k of names) {
     minx = Math.min(minx, set[k][0]); maxx = Math.max(maxx, set[k][0]);
     miny = Math.min(miny, set[k][1]); maxy = Math.max(maxy, set[k][1]);
   }
-  dpx = clamp(dpx, -minx, calib.res - maxx);
-  dpy = clamp(dpy, -miny, calib.res - maxy);
+  dpx = clamp(dpx, -minx, r - maxx);
+  dpy = clamp(dpy, -miny, r - maxy);
   for (const k of names) set[k] = [set[k][0] + dpx, set[k][1] + dpy];
   refreshDots();
 }
@@ -316,12 +385,13 @@ function scaleSet(names, factor) {
   let cx = 0, cy = 0;
   names.forEach((k) => { cx += set[k][0]; cy += set[k][1]; });
   cx /= names.length; cy /= names.length;
+  const r = RES();
   let hx = 1e-6, hy = 1e-6;
   names.forEach((k) => {
     hx = Math.max(hx, Math.abs(set[k][0] - cx));
     hy = Math.max(hy, Math.abs(set[k][1] - cy));
   });
-  const maxf = Math.min(cx / hx, (calib.res - cx) / hx, cy / hy, (calib.res - cy) / hy);
+  const maxf = Math.min(cx / hx, (r - cx) / hx, cy / hy, (r - cy) / hy);
   factor = Math.min(factor, maxf);
   for (const k of names)
     set[k] = [cx + (set[k][0] - cx) * factor, cy + (set[k][1] - cy) * factor];
@@ -334,10 +404,11 @@ const scaleAll = (factor) =>
 // Drag a group of markers rigidly; clears the selection on a click-without-move.
 function startGroupDrag(e, names) {
   const rect = markerLayer.getBoundingClientRect();
+  const r = RES();
   let last = { x: e.clientX, y: e.clientY }, moved = false;
   const move = (ev) => {
-    const dpx = ((ev.clientX - last.x) / rect.width) * calib.res;
-    const dpy = ((ev.clientY - last.y) / rect.height) * calib.res;
+    const dpx = ((ev.clientX - last.x) / rect.width) * r;
+    const dpy = ((ev.clientY - last.y) / rect.height) * r;
     if (dpx || dpy) moved = true;
     last = { x: ev.clientX, y: ev.clientY };
     moveSet(names, dpx, dpy);
@@ -354,9 +425,10 @@ function startGroupDrag(e, names) {
 // Shift+drag on empty space → rubber-band select markers inside the rectangle.
 function startRubberBand(e) {
   const rect = markerLayer.getBoundingClientRect();
+  const r = RES();
   const toPx = (ev) => [
-    clamp(((ev.clientX - rect.left) / rect.width) * calib.res, 0, calib.res),
-    clamp(((ev.clientY - rect.top) / rect.height) * calib.res, 0, calib.res),
+    clamp(((ev.clientX - rect.left) / rect.width) * r, 0, r),
+    clamp(((ev.clientY - rect.top) / rect.height) * r, 0, r),
   ];
   const [sx, sy] = toPx(e);
   const box = document.createElement("div");
@@ -366,10 +438,10 @@ function startRubberBand(e) {
     const [cx, cy] = toPx(ev);
     const x0 = Math.min(sx, cx), x1 = Math.max(sx, cx);
     const y0 = Math.min(sy, cy), y1 = Math.max(sy, cy);
-    box.style.left = (x0 / calib.res) * 100 + "%";
-    box.style.top = (y0 / calib.res) * 100 + "%";
-    box.style.width = ((x1 - x0) / calib.res) * 100 + "%";
-    box.style.height = ((y1 - y0) / calib.res) * 100 + "%";
+    box.style.left = (x0 / r) * 100 + "%";
+    box.style.top = (y0 / r) * 100 + "%";
+    box.style.width = ((x1 - x0) / r) * 100 + "%";
+    box.style.height = ((y1 - y0) / r) * 100 + "%";
     const set = cur();
     selected.clear();
     for (const k in set) {
@@ -390,12 +462,14 @@ function startRubberBand(e) {
 function resetMarkers() {
   if (editMode === "face") {
     if (faceMarkersOrig) faceMarkers = cloneMarkers(faceMarkersOrig);
+  } else if (editMode === "hands") {
+    if (handMarkersOrig) handMarkers[handSide] = cloneMarkers(handMarkersOrig[handSide]);
   } else if (bodyMarkersOrig) {
     bodyMarkers = cloneMarkers(bodyMarkersOrig);
   }
   selected.clear();
   renderMarkers();
-  if (editMode === "face") applyZoom(true);
+  if (editMode === "face" || editMode === "hands") applyZoom(true);
 }
 
 /** Zoom the editor onto the face region (face markers are tiny on a full-body
@@ -404,22 +478,23 @@ function resetMarkers() {
  *  counter-scaled so they stay a constant on-screen size. faceZoomMult is the
  *  user's manual zoom on top of the auto-fit. */
 function applyZoom(on) {
-  if (!on || !faceMarkers || !calib) {
+  const set = cur(), c = curCalib();
+  if (!on || !set || !c) {
     editorStage.style.transform = "";
     editorStage.style.transformOrigin = "";
     markerLayer.style.setProperty("--marker-scale", 1);
     return;
   }
-  const pts = Object.values(faceMarkers);
+  const pts = Object.values(set);
   const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const span = Math.max(maxX - minX, maxY - minY) || calib.res;
+  const span = Math.max(maxX - minX, maxY - minY) || c.res;
   const pad = span * 1.1;                              // generous → modest default zoom
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const fit = Math.min(3.2, Math.max(1.2, calib.res / (span + 2 * pad)));
+  const fit = Math.min(3.2, Math.max(1.2, c.res / (span + 2 * pad)));
   const z = Math.min(6, Math.max(1, fit * faceZoomMult));
-  editorStage.style.transformOrigin = `${(cx / calib.res) * 100}% ${(cy / calib.res) * 100}%`;
+  editorStage.style.transformOrigin = `${(cx / c.res) * 100}% ${(cy / c.res) * 100}%`;
   editorStage.style.transform = `scale(${z})`;
   markerLayer.style.setProperty("--marker-scale", 1 / z);
 }
@@ -430,15 +505,22 @@ function bumpZoom(factor) {
 }
 
 faceChk.addEventListener("change", () => {
-  modeRow.classList.toggle("hidden", !(faceChk.checked && faceMarkers));
-  if (!faceChk.checked) setMode("body");
+  faceModeBtn.classList.toggle("hidden", !faceChk.checked);
+  if (!faceChk.checked && editMode === "face") setMode("body");
+});
+fingersChk.addEventListener("change", () => {
+  handsModeBtn.classList.toggle("hidden", !(fingersChk.checked && handViews));
+  if (!fingersChk.checked && editMode === "hands") setMode("body");
 });
 bodyModeBtn.addEventListener("click", () => setMode("body"));
 faceModeBtn.addEventListener("click", () => setMode("face"));
+handsModeBtn.addEventListener("click", () => setMode("hands"));
+handLBtn.addEventListener("click", () => setHandSide("L"));
+handRBtn.addEventListener("click", () => setHandSide("R"));
 zoomInBtn.addEventListener("click", () => bumpZoom(1.25));
 zoomOutBtn.addEventListener("click", () => bumpZoom(1 / 1.25));
 editorStage.addEventListener("wheel", (e) => {
-  if (editMode !== "face") return;
+  if (editMode !== "face" && editMode !== "hands") return;
   e.preventDefault();
   bumpZoom(e.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
@@ -483,6 +565,8 @@ async function startRig() {
         headOnly: inputType === "head",
         faceShapekeys: faceChk.checked,
         faceMarkers: (inputType === "head" || faceChk.checked) ? faceMarkers : undefined,
+        fingerMarkers: fingersChk.checked ? handMarkers : undefined,
+        handCalib: fingersChk.checked ? handCalib : undefined,
       }),
     });
     glbDownload = data.glbDownload;

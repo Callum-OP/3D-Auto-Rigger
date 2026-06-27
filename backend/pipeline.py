@@ -262,37 +262,53 @@ _FINGERS = [
 _SEG_FRACS = (0.45, 0.33, 0.22)   # three phalanges as fractions of finger length
 
 
-def _build_fingers(eb, side, parent, wrist, tip, knuckle):
-    """Add 5 fingers x 3 joints under the hand, matching the Mixamo hierarchy.
-
-    Placement is heuristic (hands are usually low-detail blobs in input meshes):
-    fingers fan across the hand width and point along the hand direction. The
-    goal is a correctly-named, posable finger hierarchy, not per-vertex fit.
-    """
+def _heuristic_tips(wrist, tip, knuckle):
+    """Fallback fingertip targets when the hand mesh has no detectable fan
+    (mittens / very low-poly): fan 4 fingers across the hand width + a thumb."""
     hand_vec = tip - wrist
     hand_len = hand_vec.length or 0.01
     hdir = hand_vec.normalized()
     spread = Vector((0, 1, 0))        # fan across front-back (Y)
-    unit = hand_len * 0.14            # spacing between fingers (wider = easier to
-                                      # select/map individually)
-    finger_zone = hand_len * 0.45     # knuckle -> fingertip length
-
+    unit = hand_len * 0.14
+    finger_zone = hand_len * 0.45
+    tips = {}
     for fname, yoff, lmul in _FINGERS:
         base = knuckle + spread * (yoff * unit)
-        flen = finger_zone * lmul
-        prev, pos = parent, base
-        for i in range(3):
-            nxt = pos + hdir * (flen * _SEG_FRACS[i])
-            prev = _bone(eb, f"{fname}{i + 1}_{side}", pos, nxt, prev, i > 0)
-            pos = nxt
-
-    # Thumb: rooted nearer the wrist, offset to the front (-Y) and angled out.
+        tips[fname] = base + hdir * (finger_zone * lmul)
     thumb_dir = (hdir + spread * -0.7).normalized()
     pos = wrist + hand_vec * 0.25 + spread * (-2.0 * unit)
-    prev = parent
-    for i in range(3):
-        nxt = pos + thumb_dir * (finger_zone * 0.8 * _SEG_FRACS[i])
-        prev = _bone(eb, f"Thumb{i + 1}_{side}", pos, nxt, prev, i > 0)
+    tips["Thumb"] = pos + thumb_dir * (finger_zone * 0.8)
+    return tips
+
+
+def _build_fingers_from_tips(eb, side, parent, wrist, knuckle, tips):
+    """Build 5 fingers x 3 joints aiming each finger from the knuckle line to its
+    fingertip target `tips[name]` (world Vectors). Finger bases are spread 85% of
+    the way to each tip so they stay separated (near-parallel) rather than all
+    starting at the single knuckle point. The thumb roots nearer the wrist.
+
+    This is the single seam the hand-marker editor drives: pass user-placed
+    fingertip targets and the fingers land exactly on the real fingers.
+    """
+    four = ["Index", "Middle", "Ring", "Pinky"]
+    tipvs = [tips[f] for f in four]
+    mean_tip = sum(tipvs, Vector((0, 0, 0))) / 4.0
+    for fname, tipv in zip(four, tipvs):
+        base = knuckle + (tipv - mean_tip) * 0.85    # bases spread, stay separated
+        seg = tipv - base
+        prev, pos = parent, base.copy()
+        for j in range(3):
+            nxt = pos + seg * _SEG_FRACS[j]
+            prev = _bone(eb, f"{fname}{j + 1}_{side}", pos, nxt, prev, j > 0)
+            pos = nxt
+
+    tipv = tips["Thumb"]
+    base = wrist.lerp(tipv, 0.25)
+    seg = tipv - base
+    prev, pos = parent, base.copy()
+    for j in range(3):
+        nxt = pos + seg * _SEG_FRACS[j]
+        prev = _bone(eb, f"Thumb{j + 1}_{side}", pos, nxt, prev, j > 0)
         pos = nxt
 
 
@@ -350,47 +366,128 @@ def _detect_hand_span(obj, wrist, tip):
     }
 
 
-def _build_span_fingers(eb, side, parent, span):
-    """Lay 4 fingers across the detected fan + a thumb at the inner end."""
-    axis, perp, wrist = span["axis"], span["perp"], span["wrist"]
+def finger_tips(obj, side, wrist, tip):
+    """Proposed fingertip targets {Index,Middle,Ring,Pinky,Thumb: world Vector}.
+
+    Derived from the detected finger fan (per-finger reach) when the hand mesh
+    has one, else a heuristic fan. This is what the hand-marker editor shows for
+    the user to nudge, and the default the rig uses when un-edited.
+    """
+    knuckle = wrist.lerp(tip, PALM_FRAC * HAND_SCALE)
+    span = _detect_hand_span(obj, wrist, tip)
+    if not span:
+        return _heuristic_tips(wrist, tip, knuckle)
+    axis, perp, w = span["axis"], span["perp"], span["wrist"]
     hand_len, lo, hi, tip_t = span["hand_len"], span["lo"], span["hi"], span["tip_t"]
     width = hi - lo
-    knuckle_t = hand_len * PALM_FRAC          # match the Hand bone (no overlap)
-    mid = (lo + hi) * 0.5
     samples = span.get("samples", [])
 
-    def reach_at(s_pos):                      # local fingertip reach at this fan pos
+    def reach_at(s_pos):
         near = [t for (pc, t) in samples if abs(pc - s_pos) < max(width * 0.18, 0.006)]
         return max(near) if near else tip_t
 
+    tips = {}
     for i, fname in enumerate(["Index", "Middle", "Ring", "Pinky"]):
         s_tip = lo + width * (i + 0.5) / 4.0
-        s_base = mid + (s_tip - mid) * 0.85       # near-parallel: bases stay separated
-        base = wrist + (axis * knuckle_t + perp * s_base) * HAND_SCALE
-        tipv = wrist + (axis * reach_at(s_tip) + perp * s_tip) * HAND_SCALE
-        seg = tipv - base
-        prev, pos = parent, base.copy()
-        for j in range(3):
-            nxt = pos + seg * _SEG_FRACS[j]
-            prev = _bone(eb, f"{fname}{j + 1}_{side}", pos, nxt, prev, j > 0)
-            pos = nxt
-
-    # Thumb: shorter, rooted nearer the wrist, offset past the inner finger.
-    base = wrist + (axis * (hand_len * 0.25) + perp * (lo - width * 0.15)) * HAND_SCALE
-    tipv = wrist + (axis * (hand_len * 0.7) + perp * (lo - width * 0.5)) * HAND_SCALE
-    seg = tipv - base
-    prev, pos = parent, base.copy()
-    for j in range(3):
-        nxt = pos + seg * _SEG_FRACS[j]
-        prev = _bone(eb, f"Thumb{j + 1}_{side}", pos, nxt, prev, j > 0)
-        pos = nxt
+        tips[fname] = w + (axis * reach_at(s_tip) + perp * s_tip) * HAND_SCALE
+    tips["Thumb"] = w + (axis * (hand_len * 0.7) + perp * (lo - width * 0.5)) * HAND_SCALE
+    return tips
 
 
-def build_skeleton(obj, lm, fingers=False, standard=False):
+# --------------------------------------------------------------------------- #
+# Hand close-up view — top-down render + fingertip markers for the editor.
+#
+# Fingers fan in the depth (Y) plane in a T-pose, so the front/side views can't
+# separate them. A top-down (look down -Z) close-up of each hand shows the
+# fingers spread out; the user drags 5 fingertip markers onto the real tips and
+# the rig builds finger bones straight to them (see _build_fingers_from_tips).
+# --------------------------------------------------------------------------- #
+HAND_RES = 512
+
+
+def _hand_anchor(obj, lm, side):
+    """Wrist + fingertip-reference points for one hand, in world space."""
+    sign = 1 if side == "L" else -1
+    wx, hx = sign * lm["wrist_x"], sign * lm["hand_x"]
+    vw = [obj.matrix_world @ v.co for v in obj.data.vertices]
+    span = abs(hx - wx) or 0.05
+
+    def ycenter(z, x):
+        ys = [p.y for p in vw if abs(p.z - z) < 0.06 and abs(p.x - x) < 0.13]
+        return (min(ys) + max(ys)) / 2.0 if ys else 0.0
+
+    wrist = Vector((wx, ycenter(lm["wrist_z"], wx), lm["wrist_z"]))
+    tip = Vector((hx, wrist.y, lm["hand_z"]))
+    return wrist, tip, span
+
+
+def hand_calib(obj, lm, side):
+    """Top-down ortho mapping for one hand: image px <-> world (X, Y)."""
+    wrist, tip, span = _hand_anchor(obj, lm, side)
+    return {
+        "res": HAND_RES, "ortho": max(span * 2.8, 0.06),
+        "cx": (wrist.x + tip.x) / 2.0, "cy": (wrist.y + tip.y) / 2.0,
+        "hand_z": lm["hand_z"], "side": side,
+    }
+
+
+def hand_world_to_px(x, y, c):
+    return [(x - c["cx"]) / c["ortho"] * c["res"] + c["res"] / 2.0,
+            c["res"] / 2.0 - (y - c["cy"]) / c["ortho"] * c["res"]]
+
+
+def hand_px_to_world(px, py, c):
+    return Vector(((px / c["res"] - 0.5) * c["ortho"] + c["cx"],
+                   (0.5 - py / c["res"]) * c["ortho"] + c["cy"], c["hand_z"]))
+
+
+def propose_finger_markers(obj, lm, side, calib):
+    """{finger: [px, py]} fingertip markers for the hand editor (proposed)."""
+    wrist, tip, _ = _hand_anchor(obj, lm, side)
+    tips = finger_tips(obj, side, wrist, tip)
+    return {f: hand_world_to_px(v.x, v.y, calib) for f, v in tips.items()}
+
+
+def render_hand_view(obj, lm, side, out_png, calib):
+    """Render a top-down close-up of one hand for the fingertip editor."""
+    import math
+    scene = bpy.context.scene
+    cam_data = bpy.data.cameras.new("HandCam")
+    cam_data.type = "ORTHO"
+    cam_data.ortho_scale = calib["ortho"]
+    cam = bpy.data.objects.new("HandCam", cam_data)
+    scene.collection.objects.link(cam)
+    cam.location = (calib["cx"], calib["cy"], lm["hand_z"] + 2.0)
+    cam.rotation_euler = (0.0, 0.0, 0.0)        # look straight down -Z
+    scene.camera = cam
+
+    if not any(o.type == "LIGHT" for o in scene.objects):
+        d = bpy.data.lights.new("Sun", "SUN")
+        d.energy = 3.0
+        light = bpy.data.objects.new("Sun", d)
+        scene.collection.objects.link(light)
+        light.rotation_euler = (0.0, 0.0, 0.0)
+    scene.render.engine = "BLENDER_WORKBENCH"
+    sh = scene.display.shading
+    sh.light = "STUDIO"
+    sh.color_type = "SINGLE"
+    sh.single_color = (0.82, 0.82, 0.85)
+    scene.render.resolution_x = HAND_RES
+    scene.render.resolution_y = HAND_RES
+    scene.render.filepath = out_png
+    os.makedirs(os.path.dirname(os.path.abspath(out_png)), exist_ok=True)
+    bpy.ops.render.render(write_still=True)
+    bpy.data.objects.remove(cam, do_unlink=True)
+
+
+def build_skeleton(obj, lm, fingers=False, standard=False, finger_tips_override=None):
     """Create a humanoid armature from a detected landmark dict `lm`.
 
     fingers=False builds a single Hand bone per side and no finger bones — a
     clean ~22-bone humanoid. Finger bones are opt-in.
+
+    finger_tips_override = {"L": {finger: Vector}, "R": {...}} supplies user-
+    placed fingertip targets from the hand editor (else auto-detected).
 
     standard=True builds the "standard bone" SHAPE so the rig auto-recognises in
     figure-posing apps (used with bone_naming="standard"): exactly ONE shoulder
@@ -480,17 +577,18 @@ def build_skeleton(obj, lm, fingers=False, standard=False):
         # fan and the finger bones would land skewed off the real fingers.
         tip_p = Vector((hx, wrist_p.y, lm["hand_z"]))
         if fingers:
-            # Hand spans wrist -> knuckles; fingers start AT the knuckle (0.45)
-            # so they don't overlap the hand bone (the cause of fingers not
-            # registering individually when mapped).
+            # Hand spans wrist -> knuckles; fingers start AT the knuckle so they
+            # don't overlap the hand bone. Fingertip targets come from the hand
+            # editor (finger_tips_override) when the user placed them, else from
+            # auto-detection.
             knuckle = wrist_p.lerp(tip_p, PALM_FRAC * HAND_SCALE)
             hand = _bone(eb, f"Hand_{side}", wrist_p, knuckle, la, True)
-            span = _detect_hand_span(obj, wrist_p, tip_p)
-            if span:
-                log("skeleton", f"detected finger fan on {side} hand")
-                _build_span_fingers(eb, side, hand, span)
+            tips = (finger_tips_override or {}).get(side)
+            if tips:
+                log("skeleton", f"using edited fingertips on {side} hand")
             else:
-                _build_fingers(eb, side, hand, wrist_p, tip_p, knuckle)
+                tips = finger_tips(obj, side, wrist_p, tip_p)
+            _build_fingers_from_tips(eb, side, hand, wrist_p, knuckle, tips)
         else:
             # Single hand bone (wrist -> fingertips) — no finger bones.
             _bone(eb, f"Hand_{side}", wrist_p, tip_p, la, True)
@@ -1025,10 +1123,23 @@ def main():
         db, dt = face_markers.detection_band(fb_z, ft_z, fo, target_height)
         face = face_markers.detect_face(points, db, dt)
         face_px = face_markers.to_px(face_markers.default_markers(face), calib)
+        # Top-down hand close-ups + proposed fingertip markers (per side).
+        # Skipped for head-only inputs (no arms to frame).
+        hand_views, hand_cal, finger_px = {}, {}, {}
+        base_png = os.path.splitext(front_png)[0]
+        for s in ("L", "R") if not job.get("head_only") else ():
+            hc = hand_calib(obj, lm, s)
+            hp = f"{base_png}_hand_{s}.png"
+            render_hand_view(obj, lm, s, hp, hc)
+            hand_views[s], hand_cal[s] = hp, hc
+            finger_px[s] = propose_finger_markers(obj, lm, s, hc)
         with open(output, "w", encoding="utf-8") as f:
             json.dump({"front": front_png, "calib": calib,
-                       "markers": px, "face_markers": face_px}, f)
-        log("prep", f"front view + {len(px)} body + {len(face_px)} face markers")
+                       "markers": px, "face_markers": face_px,
+                       "hand_views": hand_views, "hand_calib": hand_cal,
+                       "finger_markers": finger_px}, f)
+        log("prep", f"front view + {len(px)} body + {len(face_px)} face + "
+                     f"{sum(len(v) for v in finger_px.values())} finger markers")
         return
 
     # FACE-ONLY: add ARKit shape keys to the mesh and export — no rigging.
@@ -1047,9 +1158,21 @@ def main():
         lm = markers_mod.from_markers(world, lm, target_height)
         log("rig", "using edited markers")
 
+    # Edited fingertips from the hand editor -> world targets per side.
+    finger_override = None
+    if job.get("finger_markers") and job.get("hand_calib"):
+        finger_override = {}
+        for s, marks in job["finger_markers"].items():
+            c = job["hand_calib"].get(s)
+            if c:
+                finger_override[s] = {f: hand_px_to_world(p[0], p[1], c)
+                                      for f, p in marks.items()}
+        log("rig", "using edited fingertips")
+
     naming_scheme = job.get("bone_naming", "mixamo")
     rig = build_skeleton(obj, lm, fingers=bool(job.get("fingers", True)),
-                         standard=(naming_scheme == "standard"))
+                         standard=(naming_scheme == "standard"),
+                         finger_tips_override=finger_override)
     # Skin with internal bone names (so weight masking can find limbs by role),
     # then rename bones AND their vertex groups together for the target app.
     skin(obj, rig, lm, target_height)

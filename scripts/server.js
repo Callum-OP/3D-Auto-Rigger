@@ -82,12 +82,19 @@ async function handlePrep(req, res, url) {
 
   const session = tok();
   sessions.set(session, { modelPath });
+  const handUrls = {};
+  for (const s of Object.keys(data.hand_views || {})) {
+    handUrls[s] = "/files/" + registerFile(data.hand_views[s]);
+  }
   sendJSON(res, 200, {
     token: session,
     markers: data.markers,
     faceMarkers: data.face_markers,
     calib: data.calib,
     frontUrl: "/files/" + registerFile(frontPng),
+    handViews: handUrls,
+    handCalib: data.hand_calib,
+    fingerMarkers: data.finger_markers,
   });
 }
 
@@ -111,6 +118,10 @@ async function handleRig(req, res) {
     fields.fingers = body.fingers !== false;
     if (body.boneNaming) fields.bone_naming = body.boneNaming;
     if (body.markers && body.calib) { fields.markers = body.markers; fields.calib = body.calib; }
+    if (body.fingerMarkers && body.handCalib) {
+      fields.finger_markers = body.fingerMarkers;
+      fields.hand_calib = body.handCalib;
+    }
     if (body.faceShapekeys) {
       fields.face_shapekeys = true;
       if (body.faceMarkers && body.calib) {

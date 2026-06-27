@@ -47,6 +47,12 @@ editor, switch the overlay to **Face** (zooms onto the head), drag the face
 anchors onto eyes / brows / nose / lips / chin, then Build. The output carries
 both the armature and the 52 ARKit shape keys on one mesh.
 
+For accurate fingers, switch the overlay to **Hands** — a top-down close-up of
+each hand (fingers fan out from this angle) with 5 draggable fingertip markers.
+Drag each onto the real fingertip; **Mirror** copies to the other hand (or pick
+**Left/Right hand** to edit each separately). The finger bones build straight to
+those tips.
+
 Headless / no UI:
 
 ```sh

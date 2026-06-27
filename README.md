@@ -14,7 +14,9 @@ scripts/server.js  Local Node web server (built-in http) — serves web/ and
 scripts/blenderRunner.js  spawns headless Blender with a job JSON
 scripts/cli.js   headless CLI wrapper around the same pipeline
 backend/         pipeline.py — the rigging pipeline, run inside Blender
-                 (landmarks.py, markers.py, csp_bones.py, preview_pose.py)
+                 (landmarks.py, markers.py, bone_naming.py, face_shapekeys.py)
+tools/           dev/validation scripts run in Blender (preview_pose.py,
+                 preview_face.py, read_bones.py)
 config.json      Blender path + default target height
 ```
 
@@ -65,7 +67,7 @@ npm run face -- path/to/model.glb face.glb   # ARKit-52 shape keys only, no rig
 4. **Face (optional)** — from the face markers, `backend/face_shapekeys.py`
    builds the 52 ARKit blendshapes as shape keys (marker-driven: each anchor
    snaps to the surface and defines a deformation region; jaw/eyes/brows/mouth
-   recipes in `arkit.py` order). Validate with `backend/preview_face.py`.
+   recipes in `arkit.py` order). Validate with `tools/preview_face.py`.
 
 ## Supported input formats
 
@@ -76,4 +78,5 @@ npm run face -- path/to/model.glb face.glb   # ARKit-52 shape keys only, no rig
 The output skeleton uses a standard Mixamo-style **Humanoid** hierarchy
 (`Hips → Spine → Spine1 → Spine2 → Neck → Head`, mirrored arms/legs with 3-bone
 fingers and toes) so rigs are usable broadly — game engines, DCC tools, and
-figure apps (e.g. Clip Studio) alike.
+figure-posing apps alike. A "Standard bones" option emits a lowercase
+`*_bb_` standard-bone naming so compatible figure apps auto-recognize the rig.

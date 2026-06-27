@@ -29,7 +29,7 @@ from mathutils import Vector
 # Make sibling modules importable when run via `blender --python backend/pipeline.py`.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import landmarks
-import csp_bones
+import bone_naming
 import markers as markers_mod
 import face_markers
 import face_shapekeys
@@ -206,10 +206,10 @@ def _bone(edit_bones, name, head, tail, parent=None, connected=False):
 
 
 def clean_mesh(obj):
-    """Make the mesh watertight-ish for clean skinning + CSP compatibility.
+    """Make the mesh watertight-ish for clean skinning + broad app compatibility.
 
     Open holes (non-manifold boundary edges) and stray geometry are a common
-    cause of Clip Studio crashing when it finalizes a character. We merge
+    cause of figure-posing apps crashing when they finalize a character. We merge
     duplicate verts, fill holes, and make normals consistent.
     """
     bpy.ops.object.select_all(action="DESELECT")
@@ -299,7 +299,7 @@ def _build_fingers(eb, side, parent, wrist, tip, knuckle):
 _FINGER_NAMES = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
 
 # Hand/finger bones are scaled toward the wrist by this factor so they sit
-# right on the model (full-size bones read as oversized/chunky in CSP).
+# right on the model (full-size bones read as oversized/chunky in figure apps).
 HAND_SCALE = 0.8
 # Palm (Hand bone) length as a fraction of wrist->fingertip; fingers start here.
 PALM_FRAC = 0.5
@@ -386,16 +386,21 @@ def _build_span_fingers(eb, side, parent, span):
         pos = nxt
 
 
-def build_skeleton(obj, lm, fingers=False):
+def build_skeleton(obj, lm, fingers=False, standard=False):
     """Create a humanoid armature from a detected landmark dict `lm`.
 
-    fingers=False (default) builds a single Hand bone per side and no finger
-    bones — a clean ~22-bone humanoid matching the structure of a known-working
-    Clip Studio rig (the reference BVH). The 30 finger bones are what choke
-    CSP's standard-bone-mapping tool, so they're opt-in.
+    fingers=False builds a single Hand bone per side and no finger bones — a
+    clean ~22-bone humanoid. Finger bones are opt-in.
+
+    standard=True builds the "standard bone" SHAPE so the rig auto-recognises in
+    figure-posing apps (used with bone_naming="standard"): exactly ONE shoulder
+    bone per side (= leftshoulder_bb_) instead of our Clavicle+Shoulder pair, and
+    no head-direction bone (it has no standard-bone equivalent). Everything else
+    maps 1:1 to the spec names in bone_naming.STANDARD_BB.
     """
     log("skeleton", "assembling armature from landmarks"
-                    + ("" if fingers else " (no fingers)"))
+                    + ("" if fingers else " (no fingers)")
+                    + (" (standard shape)" if standard else ""))
 
     arm = bpy.data.armatures.new("AutoRig")
     rig = bpy.data.objects.new("AutoRig", arm)
@@ -414,9 +419,9 @@ def build_skeleton(obj, lm, fingers=False):
         ys = [p.y for p in vw if abs(p.z - z) < ztol and abs(p.x - x) < xtol]
         return (min(ys) + max(ys)) / 2.0 if ys else 0.0
 
-    # HIPS is the character root — every other bone descends from it. CSP wants
-    # the hip bone as the root; an extra floor/root bone above it is a documented
-    # cause of Modeler's "register as character" crash, so we don't add one.
+    # HIPS is the character root — every other bone descends from it. Figure apps
+    # want the hip bone as the root; an extra floor/root bone above it is a known
+    # cause of "register as character" failures, so we don't add one.
     #
     # Spine chain (centered on X=0). The lower torso is split in two (belly bone),
     # and the topmost spine bone (Spine2) reaches up to the neck — there's no
@@ -435,28 +440,37 @@ def build_skeleton(obj, lm, fingers=False):
     head_h = lm["head_top_z"] - nh
     neck = _bone(eb, "Neck", (0, by(neck_base), neck_base), (0, by(nh), nh), spine2, True)
     head = _bone(eb, "Head", (0, by(nh), nh), (0, by(lm["head_top_z"]), lm["head_top_z"]), neck, True)
-    # Forward-pointing face joint (the head-facing-direction target CSP's bone
-    # mapping asks you to assign as part of the head region). Faces -Y (front).
-    face_z = nh + 0.5 * head_h
-    hfy = by(face_z)
-    _bone(eb, "HeadFace", (0, hfy, face_z), (0, hfy - 0.9 * head_h, face_z), head, False)
+    # Forward-pointing face joint (the head-facing-direction target some figure
+    # apps ask you to assign as part of the head region). Faces -Y (front).
+    if not standard:   # the standard-bone skeleton has no head-direction bone
+        face_z = nh + 0.5 * head_h
+        hfy = by(face_z)
+        _bone(eb, "HeadFace", (0, hfy, face_z), (0, hfy - 0.9 * head_h, face_z),
+              head, False)
 
     # Arms + legs, mirrored L/R. side sign: +X = left.
     for side, sign in (("L", 1), ("R", -1)):
         shx, ex, wx, hx = (sign * lm["shoulder_x"], sign * lm["elbow_x"],
                            sign * lm["wrist_x"], sign * lm["hand_x"])
         shz = lm["shoulder_z"]
-        # Clavicle (near the chest) -> Shoulder (at the joint): two bones, as in
-        # CSP's standard skeleton, where we previously had one.
-        clav = _bone(eb, f"Clavicle_{side}",
-                     (0, by(lm["chest_z"]), lm["chest_z"]),
-                     (shx * 0.5, by(shz, shx * 0.5), shz), spine2, False)
-        sh = _bone(eb, f"Shoulder_{side}",
-                   (shx * 0.5, by(shz, shx * 0.5), shz),
-                   (shx, by(shz, shx), shz), clav, True)
+        if standard:
+            # Standard-bone skeleton: ONE shoulder bone (clavicle, chest -> joint);
+            # the arm parents straight to it (no second Shoulder bone).
+            clav = _bone(eb, f"Clavicle_{side}",
+                         (0, by(lm["chest_z"]), lm["chest_z"]),
+                         (shx, by(shz, shx), shz), spine2, False)
+            arm_parent = clav
+        else:
+            # Clavicle (near the chest) -> Shoulder (at the joint): two bones.
+            clav = _bone(eb, f"Clavicle_{side}",
+                         (0, by(lm["chest_z"]), lm["chest_z"]),
+                         (shx * 0.5, by(shz, shx * 0.5), shz), spine2, False)
+            arm_parent = _bone(eb, f"Shoulder_{side}",
+                               (shx * 0.5, by(shz, shx * 0.5), shz),
+                               (shx, by(shz, shx), shz), clav, True)
         ua = _bone(eb, f"UpperArm_{side}",
                    (shx, by(shz, shx), shz),
-                   (ex, by(lm["elbow_z"], ex), lm["elbow_z"]), sh, True)
+                   (ex, by(lm["elbow_z"], ex), lm["elbow_z"]), arm_parent, True)
         la = _bone(eb, f"LowerArm_{side}",
                    (ex, by(lm["elbow_z"], ex), lm["elbow_z"]),
                    (wx, by(lm["wrist_z"], wx), lm["wrist_z"]), ua, True)
@@ -725,8 +739,8 @@ def _mask_fingers(obj, rig):
 def _ensure_finger_weights(obj, rig):
     """No finger bone may be weightless.
 
-    Empty deform bones break CSP's "Complete as character" finalize AND leave the
-    joint unposeable. The voxel weight proxy is too coarse to reach the thin
+    Empty deform bones break some apps' "finalize as character" step AND leave
+    the joint unposeable. The voxel weight proxy is too coarse to reach the thin
     distal phalanges / edge fingers, so they often end up with no weights — give
     any empty finger segment weight on the mesh verts nearest its centerline.
     """
@@ -758,14 +772,14 @@ def _ensure_finger_weights(obj, rig):
 
 
 def _cleanup_weights(obj):
-    """Cap influences and soften hard mask boundaries (CSP/engine-friendly).
+    """Cap influences and soften hard mask boundaries (broadly app-friendly).
 
     - manual edge smooth: blends the HARD mask boundaries so vertices at a zone
       edge don't tear/stretch apart when posed (the "sticking out" artifact).
       Done by hand because Blender's vertex_group_smooth operator can't run in
       headless --background (it needs a viewport context).
-    - limit to 4 influences/vertex: CSP and game engines cap bone influences;
-      too many can make CSP crash when finalizing the rig.
+    - limit to 4 influences/vertex: figure apps and game engines cap bone
+      influences; too many can make some apps fail when finalizing the rig.
     """
     _smooth_weights(obj, iterations=1, factor=0.3)
     bpy.ops.object.select_all(action="DESELECT")
@@ -838,10 +852,10 @@ def export_glb(path):
 def simplify_materials(obj):
     """Replace the mesh's materials with one plain material for the FBX.
 
-    Clip Studio's character finalize is reported to crash on the materials
+    Some figure apps' character finalize is reported to crash on the materials
     themselves (missing image data, multiple texture nodes, vertex colors) — and
     our GLB export warns about exactly those. The preview GLB keeps the originals;
-    only the FBX (CSP's input) is simplified.
+    only the FBX (the figure app's input) is simplified.
     """
     me = obj.data
     me.materials.clear()
@@ -855,15 +869,19 @@ def simplify_materials(obj):
             me.color_attributes.remove(me.color_attributes[0])
     except Exception:  # noqa: BLE001 - color attrs are optional
         pass
-    log("export", "simplified materials for FBX (CSP-safe)")
+    log("export", "simplified materials for FBX")
 
 
-def export_fbx(path):
+def export_fbx(path, leaf_bones=True):
     """Export an engine-friendly FBX (armature + mesh, no baked animation).
 
     FBX 7.4 binary with a standard humanoid bone hierarchy works broadly —
-    game engines, DCC tools, and figure apps (e.g. Clip Studio, which needs
-    FBX <=7.4) alike. T-pose so downstream auto-mapping lines up.
+    game engines, DCC tools, and figure-posing apps (which need FBX <=7.4) alike.
+    T-pose so downstream auto-mapping lines up.
+
+    leaf_bones=False for the standard-bone path: Blender's auto leaf bones get the
+    wrong names (head_bb__end, not the spec's head_end_bb_), so they'd be extra
+    non-standard bones — better to omit them than mis-name them.
     """
     log("export", f"writing {os.path.basename(path)}")
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -872,9 +890,7 @@ def export_fbx(path):
         filepath=path,
         use_selection=True,
         object_types={"ARMATURE", "MESH"},
-        add_leaf_bones=True,         # CSP's standard skeleton expects end bones
-                                     # (head_end, finger ends, toe ends) — same as
-                                     # the reference BVH's End Sites
+        add_leaf_bones=leaf_bones,   # mixamo: End Sites; standard: off (see above)
         bake_anim=False,
         mesh_smooth_type="FACE",
         apply_unit_scale=True,
@@ -949,14 +965,14 @@ def add_face_shapekeys(obj, job, lm, H):
                          sets=job.get("face_sets"), log=log)
 
 
-def export_all(obj, output):
-    """Write the preview GLB and a CSP-safe FBX sibling (FBX failure is non-fatal
-    so a flaky export can't sink an otherwise-good result)."""
+def export_all(obj, output, leaf_bones=True):
+    """Write the preview GLB and an FBX sibling (FBX failure is non-fatal so a
+    flaky export can't sink an otherwise-good result)."""
     export_glb(output)
     fbx_path = os.path.splitext(output)[0] + ".fbx"
     try:
-        simplify_materials(obj)         # CSP can crash on the original materials
-        export_fbx(fbx_path)
+        simplify_materials(obj)         # some apps crash on the original materials
+        export_fbx(fbx_path, leaf_bones=leaf_bones)
     except Exception as e:  # noqa: BLE001 - report and continue
         log("export", f"WARNING: FBX export failed, GLB still available: {e}")
 
@@ -1031,12 +1047,13 @@ def main():
         lm = markers_mod.from_markers(world, lm, target_height)
         log("rig", "using edited markers")
 
-    rig = build_skeleton(obj, lm, fingers=bool(job.get("fingers", True)))
+    naming_scheme = job.get("bone_naming", "mixamo")
+    rig = build_skeleton(obj, lm, fingers=bool(job.get("fingers", True)),
+                         standard=(naming_scheme == "standard"))
     # Skin with internal bone names (so weight masking can find limbs by role),
     # then rename bones AND their vertex groups together for the target app.
     skin(obj, rig, lm, target_height)
-    bone_naming = job.get("bone_naming", "mixamo")
-    csp_bones.rename(rig, bone_naming, obj=obj, log=log)
+    bone_naming.rename(rig, naming_scheme, obj=obj, log=log)
 
     # FACE: optional ARKit shape keys on the same mesh, so the exported character
     # both poses (armature) and emotes (shape keys). Built after skinning so the
@@ -1044,7 +1061,7 @@ def main():
     if job.get("face_shapekeys"):
         add_face_shapekeys(obj, job, lm, target_height)
 
-    export_all(obj, output)
+    export_all(obj, output, leaf_bones=(naming_scheme != "standard"))
     log("done", output)
 
 

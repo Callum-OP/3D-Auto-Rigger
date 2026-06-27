@@ -9,6 +9,8 @@ const buildBtn = document.getElementById("buildBtn");
 const backBtn = document.getElementById("backBtn");
 const fingersChk = document.getElementById("fingersChk");
 const fingersRow = document.getElementById("fingersRow");
+const stdBonesChk = document.getElementById("stdBonesChk");
+const stdBonesRow = document.getElementById("stdBonesRow");
 const saveBtn = document.getElementById("saveBtn");
 const saveFbxBtn = document.getElementById("saveFbxBtn");
 const inputName = document.getElementById("inputName");
@@ -110,8 +112,9 @@ function setPhase(phase) {
   buildBtn.classList.toggle("hidden", !editing);
   backBtn.classList.toggle("hidden", !editing);
   resetBtn.classList.toggle("hidden", !editing);
-  // Body-only controls: fingers + the "add face shapes" opt-in.
+  // Body-only controls: fingers, standard bones, + the "add face" opt-in.
   fingersRow.classList.toggle("hidden", !editing || head);
+  stdBonesRow.classList.toggle("hidden", !editing || head);
   faceRow.classList.toggle("hidden", !editing || head);
   if (editing) viewerPlaceholder.style.display = "none";
 
@@ -476,6 +479,7 @@ async function startRig() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         token, markers: bodyMarkers, calib, fingers: fingersChk.checked,
+        boneNaming: stdBonesChk.checked ? "standard" : "mixamo",
         headOnly: inputType === "head",
         faceShapekeys: faceChk.checked,
         faceMarkers: (inputType === "head" || faceChk.checked) ? faceMarkers : undefined,

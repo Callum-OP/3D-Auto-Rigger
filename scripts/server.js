@@ -109,6 +109,7 @@ async function handleRig(req, res) {
     }
   } else {
     fields.fingers = body.fingers !== false;
+    if (body.boneNaming) fields.bone_naming = body.boneNaming;
     if (body.markers && body.calib) { fields.markers = body.markers; fields.calib = body.calib; }
     if (body.faceShapekeys) {
       fields.face_shapekeys = true;

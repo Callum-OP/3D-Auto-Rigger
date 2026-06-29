@@ -679,7 +679,13 @@ def skin(obj, rig, lm, H):
     _mask_weights(obj, lm, H)
     _mask_fingers(obj, rig)
     _ensure_finger_weights(obj, rig)
-    _cleanup_weights(obj)
+    # Which bones each vertex must NEVER hold — the hard left/right + per-finger
+    # separations. Passed into the smoothing pass so it can soften WITHIN a limb
+    # (and curl fingers) without bleeding weight back across the crotch or
+    # between adjacent fingers.
+    forbidden = _separation_forbidden(obj, lm, H)
+    _add_finger_forbidden(obj, forbidden)
+    _cleanup_weights(obj, forbidden)
     log("skin", "skinning complete")
 
 
@@ -869,7 +875,91 @@ def _ensure_finger_weights(obj, rig):
         log("skin", f"filled {fixed} empty finger bones")
 
 
-def _cleanup_weights(obj):
+_FINGER_NAMES_SEP = ("Thumb", "Index", "Middle", "Ring", "Pinky")
+_ARM_PARTS_SEP = (["Clavicle", "Shoulder", "UpperArm", "LowerArm", "Hand"]
+                  + [f"{f}{n}" for f in _FINGER_NAMES_SEP for n in (1, 2, 3)])
+_LEG_PARTS_SEP = ["UpperLeg", "LowerLeg", "Foot", "Toe"]
+
+
+def _separation_forbidden(obj, lm, H):
+    """Per-vertex set of bone GROUP INDICES the vertex must never hold — the HARD
+    left/right + limb-reach separations (same rules as _mask_weights, minus the
+    soft spine bands). Used to keep weight-smoothing from re-bleeding weight
+    across the body's midline. Returns list[set] indexed by vertex.
+    """
+    def named(parts, side):
+        return [f"{p}_{side}" for p in parts]
+
+    name2idx = {vg.name: vg.index for vg in obj.vertex_groups}
+
+    def idxs(names):
+        return {name2idx[n] for n in names if n in name2idx}
+
+    L_i = idxs(named(_ARM_PARTS_SEP, "L") + named(_LEG_PARTS_SEP, "L"))
+    R_i = idxs(named(_ARM_PARTS_SEP, "R") + named(_LEG_PARTS_SEP, "R"))
+    leg_i = idxs(named(_LEG_PARTS_SEP, "L") + named(_LEG_PARTS_SEP, "R"))
+    arm_i = idxs(named(_ARM_PARTS_SEP, "L") + named(_ARM_PARTS_SEP, "R"))
+    head_i = idxs(["Neck", "Head"])
+
+    x_margin = 0.008
+    hips_top = lm["hips_z"] + 0.02 * H
+    neck_base = lm["neck_z"] - 0.10 * (lm["head_top_z"] - lm["neck_z"])
+    arm_bot = lm["chest_z"] - 0.12 * H
+    mw = obj.matrix_world
+
+    forbidden = [set() for _ in range(len(obj.data.vertices))]
+    for v in obj.data.vertices:
+        co = mw @ v.co
+        f = forbidden[v.index]
+        if co.x < -x_margin:
+            f |= L_i                       # right half: no left-limb weight
+        elif co.x > x_margin:
+            f |= R_i                       # left half: no right-limb weight
+        if co.z > hips_top:
+            f |= leg_i                     # above the hips: no leg weight
+        if co.z < arm_bot:
+            f |= arm_i                     # below the chest: no arm/finger weight
+        if co.z < neck_base:
+            f |= head_i                    # below the neck: no neck/head weight
+    return forbidden
+
+
+def _add_finger_forbidden(obj, forbidden):
+    """Forbid each finger vertex from holding OTHER fingers' segments (so
+    smoothing can't drag a neighbouring finger along). A vertex's owning finger
+    is whichever finger segment it currently carries (one each, after
+    _mask_fingers); its own 3 segments stay allowed so the finger still curls."""
+    name2idx = {vg.name: vg.index for vg in obj.vertex_groups}
+    idx2name = {i: n for n, i in name2idx.items()}
+    seg_by_finger, all_finger_i = {}, set()
+    for side in ("L", "R"):
+        for fn in _FINGER_NAMES_SEP:
+            s = {name2idx[f"{fn}{n}_{side}"] for n in (1, 2, 3)
+                 if f"{fn}{n}_{side}" in name2idx}
+            if s:
+                seg_by_finger[(side, fn)] = s
+                all_finger_i |= s
+
+    def owner(name):
+        for side in ("L", "R"):
+            for fn in _FINGER_NAMES_SEP:
+                if name.startswith(fn) and name.endswith(f"_{side}"):
+                    return (side, fn)
+        return None
+
+    for v in obj.data.vertices:
+        own = None
+        for g in v.groups:
+            if g.weight > 0.0:
+                o = owner(idx2name.get(g.group, ""))
+                if o:
+                    own = o
+                    break
+        if own:
+            forbidden[v.index] |= (all_finger_i - seg_by_finger.get(own, set()))
+
+
+def _cleanup_weights(obj, forbidden=None):
     """Cap influences and soften hard mask boundaries (broadly app-friendly).
 
     - manual edge smooth: blends the HARD mask boundaries so vertices at a zone
@@ -879,7 +969,7 @@ def _cleanup_weights(obj):
     - limit to 4 influences/vertex: figure apps and game engines cap bone
       influences; too many can make some apps fail when finalizing the rig.
     """
-    _smooth_weights(obj, iterations=1, factor=0.3)
+    _smooth_weights(obj, iterations=1, factor=0.3, forbidden=forbidden)
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
@@ -888,8 +978,13 @@ def _cleanup_weights(obj):
                                               lock_active=False)
 
 
-def _smooth_weights(obj, iterations=2, factor=0.5):
-    """Laplacian-style weight smoothing across mesh edges (headless-safe)."""
+def _smooth_weights(obj, iterations=2, factor=0.5, forbidden=None):
+    """Laplacian-style weight smoothing across mesh edges (headless-safe).
+
+    `forbidden` (list[set] of group indices per vertex) blocks a vertex from ever
+    gaining weight for a bone on the wrong side / wrong finger, so smoothing
+    softens within a limb but never bleeds across the midline or between fingers.
+    """
     me = obj.data
     n = len(me.vertices)
     neighbors = [[] for _ in range(n)]
@@ -916,6 +1011,9 @@ def _smooth_weights(obj, iterations=2, factor=0.5):
                 for ni in nb:
                     for gi, w in weights[ni].items():
                         acc[gi] = acc.get(gi, 0.0) + f * w
+            if forbidden:
+                for gi in forbidden[vi]:
+                    acc.pop(gi, None)       # never let a wrong-side bone bleed in
             nxt[vi] = acc
         weights = nxt
 
